@@ -32,11 +32,10 @@ The reward function has three components that encourage both winning and efficie
 | Signal | When | Purpose |
 |--------|------|---------|
 | `0.5 × log(before/after)` | Every step | Reward information gain — shrinking the candidate pool |
-| `-0.01` | Every step | Small penalty to discourage stalling |
 | `32 / 16 / 8 / 4 / 2 / 1` | Win in 1–6 guesses | Exponential win bonus |
 | `-6.0` | Loss | Terminal penalty |
 
-The exponential win scale means winning in 2 guesses (16.0) is rewarded 4× more than winning in 4 (4.0), matching the actual difficulty curve of Wordle.
+The info gain signal already implicitly penalises wasting steps — a guess that barely shrinks the candidate pool gets near-zero reward, naturally pushing the agent toward efficient play. The exponential win scale means winning in 2 guesses (16.0) is rewarded 4× more than winning in 4 (4.0), matching the actual difficulty curve of Wordle.
 
 ### Network
 An embedding-based actor-critic MLP. Rather than feeding raw numbers, each board tile is represented as learned embeddings:

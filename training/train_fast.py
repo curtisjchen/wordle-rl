@@ -36,7 +36,7 @@ from env.wordle_env import WordleEnv
 DATA_DIR       = "data"
 MODEL_DIR      = "models"
 
-N_ENVS         = 128
+N_ENVS         = 32
 N_ITERATIONS   = 5_000
 STEPS_PER_ENV  = 32        # batch = N_ENVS * STEPS_PER_ENV = 1024
 
@@ -49,7 +49,7 @@ VF_COEF        = 0.5
 ENT_COEF       = 0.005
 MAX_GRAD_NORM  = 0.5
 N_EPOCHS       = 4
-MINIBATCH_SIZE = 512
+MINIBATCH_SIZE = 256
 
 LOG_EVERY      = 25
 SAVE_EVERY     = 500
@@ -58,7 +58,6 @@ EVAL_EPISODES  = 500
 # Must match wordle_env.py
 WIN_REWARDS    = {1: 32.0, 2: 16.0, 3: 8.0, 4: 4.0, 5: 2.0, 6: 1.0}
 LOSS_REWARD    = -6.0
-STEP_PENALTY   = -0.01
 INFO_GAIN_COEF =  0.5
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -154,7 +153,7 @@ class FastWordleEnv:
         after = int(self.valid_mask_arr.sum())
 
         info_gain = np.log(before + 1) - np.log(after + 1)
-        reward    = STEP_PENALTY + INFO_GAIN_COEF * info_gain
+        reward    = INFO_GAIN_COEF * info_gain
         if over:
             reward += WIN_REWARDS[self.step_num] if won else LOSS_REWARD
 
@@ -361,7 +360,7 @@ def main():
     print(f"  Trunk input    : {trunk_in}  (30 tiles × 40 + 8 step embedding)")
     print(f"  Vocab size     : {base_env.vocab_size:,}")
     print(f"  Parallel envs  : {N_ENVS}  |  Batch : {N_ENVS * STEPS_PER_ENV}")
-    print(f"  Reward         : info_gain×{INFO_GAIN_COEF} + step{STEP_PENALTY} + terminal")
+    print(f"  Reward         : info_gain×{INFO_GAIN_COEF} + terminal")
     print(f"  Win rewards    : {list(WIN_REWARDS.values())}  |  loss {LOSS_REWARD}")
     print(f"{'='*64}\n")
 

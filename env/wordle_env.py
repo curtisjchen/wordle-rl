@@ -26,7 +26,6 @@ import numpy as np
 # Reward constants
 WIN_REWARDS    = {1: 32.0, 2: 16.0, 3: 8.0, 4: 4.0, 5: 2.0, 6: 1.0}
 LOSS_REWARD    = -6.0
-STEP_PENALTY   = -0.01
 INFO_GAIN_COEF =  0.5
 
 
@@ -98,8 +97,7 @@ class WordleEnv:
         # Information gain: how much did this guess shrink the search space?
         info_gain = np.log(before + 1) - np.log(after + 1)
 
-        reward  = STEP_PENALTY
-        reward += INFO_GAIN_COEF * info_gain
+        reward = INFO_GAIN_COEF * info_gain
         if over:
             reward += WIN_REWARDS[self.step_num] if won else LOSS_REWARD
 
