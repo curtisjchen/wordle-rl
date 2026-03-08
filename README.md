@@ -1,6 +1,6 @@
 # Wordle RL
 
-A reinforcement learning agent trained to play Wordle, built from scratch using pure PyTorch and PPO. Includes an interactive Pygame app where you type a secret word and watch the model guess it with tile-flip animations.
+A reinforcement learning agent trained to play Wordle, built from scratch using pure PyTorch and PPO. Includes an interactive Pygame app where you type a secret word and watch the model guess.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue) ![PyTorch](https://img.shields.io/badge/pytorch-2.0+-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -8,12 +8,12 @@ A reinforcement learning agent trained to play Wordle, built from scratch using 
 
 ## Demo
 
-The user types a 5-letter secret word. The trained agent guesses it in real time, with Wordle-style tile-flip animations revealing each guess.
+The user types a 5-letter secret word. The trained agent guesses it in real time.
 
 ```
 Secret word: CRANE
 
-Guess 1: STALE  ⬛🟨⬛🟩⬛   (2,847 candidates → 142)
+Guess 1: STALE  ⬛🟨⬛🟩⬛
 Guess 2: CRANE  🟩🟩🟩🟩🟩   ✅ solved in 2!
 ```
 
@@ -27,33 +27,13 @@ A pure Python Wordle environment with no external RL libraries. Each episode the
 **Action masking** — words eliminated by prior feedback are masked out of the action space, so the agent never guesses a word that contradicts what it already knows.
 
 ### Reward
-The reward function has three components that encourage both winning and efficient play:
-
-| Signal | When | Purpose |
-|--------|------|---------|
-| `0.5 × log(before/after)` | Every step | Reward information gain — shrinking the candidate pool |
-| `32 / 16 / 8 / 4 / 2 / 1` | Win in 1–6 guesses | Exponential win bonus |
-| `-6.0` | Loss | Terminal penalty |
-
-The info gain signal already implicitly penalises wasting steps — a guess that barely shrinks the candidate pool gets near-zero reward, naturally pushing the agent toward efficient play. The exponential win scale means winning in 2 guesses (16.0) is rewarded 4× more than winning in 4 (4.0), matching the actual difficulty curve of Wordle.
+Still tweaking.
 
 ### Network
-An embedding-based actor-critic MLP. Rather than feeding raw numbers, each board tile is represented as learned embeddings:
-
-```
-Letter embedding:  27 values → 32 dims   (a–z + empty)
-Color  embedding:   4 values →  8 dims   (gray / yellow / green / empty)
-Step   embedding:   7 values →  8 dims   (0–6)
-
-30 tiles × (32 + 8) + 8 step = 1208-dim input
-→ Linear(1208, 256) → ReLU
-→ Linear(256,  256) → ReLU
-→ Policy head: Linear(256, vocab_size)   — action logits
-→ Value  head: Linear(256, 1)            — state value estimate
-```
+Still tweaking.
 
 ### Training
-PPO (Proximal Policy Optimisation) implemented from scratch. The fast trainer runs 32 environments in parallel with a precomputed score cache that makes mask recomputation a single vectorised numpy op rather than a Python loop.
+PPO (Proximal Policy Optimisation) implemented from scratch. The fast trainer runs N environments in parallel with a precomputed score cache that makes mask recomputation a single vectorised numpy op rather than a Python loop.
 
 ---
 
@@ -67,14 +47,14 @@ wordle-rl/
 │   └── words.txt            # 14,855 valid 5-letter words (after fetch)
 │
 ├── env/
-│   └── wordle_env.py        # Wordle environment — pure Python, no Gymnasium
+│   └── wordle_env.py        # Wordle environment
 │
 ├── agent/
 │   ├── network.py           # embedding network (policy + value heads)
 │   └── ppo.py               # PPO algorithm + rollout buffer
 │
 ├── training/
-│   ├── train.py             # reference training loop (simple, readable)
+│   ├── train.py             # reference training loop
 │   └── train_fast.py        # fast training — vectorized envs + score cache
 │
 ├── app/
@@ -111,16 +91,7 @@ uv run training/train_fast.py
 uv run training/train.py
 ```
 
-Training logs win rate, average guesses, and entropy every 25 iterations. Expect:
-
-| Iteration | Win Rate | Avg Guesses |
-|-----------|----------|-------------|
-| 250       | ~70%     | ~4.8        |
-| 1000      | ~82%     | ~4.2        |
-| 3000      | ~90%     | ~3.8        |
-| 5000      | ~93%+    | ~3.5        |
-
-Checkpoints are saved to `models/` every 500 iterations.
+Checkpoints are saved to `models/` every N iterations.
 
 ### 4. Play
 ```bash
@@ -130,36 +101,7 @@ uv run app/main.py
 uv run app/main.py --model models/fast_ckpt_02500.pt
 ```
 
-Type a 5-letter word in the input box and press Enter. The model will guess it with animated tile reveals.
-
----
-
-## Design Decisions
-
-**No Gymnasium** — the environment is a plain Python class with `reset()` and `step()`. No dependency on a gym framework for a single custom environment.
-
-**No RL library** — PPO is implemented in ~150 lines of pure PyTorch. Every part of the training loop is visible and editable.
-
-**Single word list** — the original Wordle separates answers (~2,315 common words) from valid guesses (~13,000 total). This project uses one unified list of 14,855 words. Any word can be the secret, any word can be guessed. This is a deliberate simplification for a general word-guessing agent rather than a Wordle solver.
-
-**Score cache** — all 14,855 × 14,855 ≈ 220M (guess, secret) → color pairs are precomputed once and saved to `data/score_cache.npy`. This makes action mask recomputation a single vectorised numpy comparison rather than iterating in Python, providing a ~20–50× speedup on that operation.
-
-**Embeddings over raw floats** — feeding integer indices into learned embedding tables lets the network generalise across letters (vowels can cluster together) and colors (the ordinal relationship green > yellow > gray can be learned), which a raw normalised float representation cannot easily express.
-
----
-
-## Extending to n-Letter Words
-
-The environment is parameterised for easy extension:
-
-```python
-# In wordle_env.py
-env = WordleEnv("data", word_len=6)   # 6-letter mode
-```
-
-Each word length needs its own word list (`data/words_6.txt`) and trained model. The network adapts automatically since `obs_dim` and `vocab_size` are passed at construction time. See the [wordfreq](https://github.com/rspeer/wordfreq) library for generating filtered word lists by length.
-
----
+Type a 5-letter word in the input box and press Enter. The model will try to guess your word.
 
 ## Requirements
 
