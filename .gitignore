@@ -9,5 +9,5 @@ wheels/
 # Virtual environments
 .venv
 data/score_cache.npy
-models/*
-mlruns/*
+models/fast_ckpt_*.pt
+models/checkpoint_*.pt

@@ -1,7 +1,6 @@
 import sys
 import os
 import argparse
-import re
 import math
 
 # --- PATH SETUP ---
@@ -28,9 +27,11 @@ MODEL_DIR = "models"
 N_ENVS         = 256
 STEPS_PER_ENV  = 16
 MINIBATCH_SIZE = 256
-N_ITERATIONS   = 5_000
+N_ITERATIONS   = 5_000   # how many MORE iterations to train
 
-LR = 3e-4
+# Low LR — model is already trained, just sharpening
+LR     = 8e-6
+LR_MIN = 1e-6
 
 GAMMA         = 0.99
 GAE_LAMBDA    = 0.95
@@ -39,10 +40,13 @@ VF_COEF       = 0.5
 N_EPOCHS      = 4
 MAX_GRAD_NORM = 0.5
 
-ENT_COEF_START = 0.05
-ENT_COEF_END   = 0.005
+# Entropy kept low and flat — we want the policy to commit, not explore
+ENT_COEF = 0.002
 
 HIDDEN_DIM = 384
+
+# No scaffolding — all envs guess freely from full vocab
+MASK_PROB = 0.0
 
 LOG_EVERY  = 1
 SAVE_EVERY = 500
@@ -52,7 +56,7 @@ SAVE_EVERY = 500
 def load_score_cache(env: WordleEnv):
     cache_path = os.path.join(DATA_DIR, "score_cache.npy")
     if not os.path.exists(cache_path):
-        raise FileNotFoundError("Run train_fast.py once to build 'score_cache.npy' first!")
+        raise FileNotFoundError("score_cache.npy not found.")
     print(" Loading score cache...", end=" ", flush=True)
     cache_np = np.load(cache_path).astype(np.int16)
     print(f"OK {cache_np.shape}  dtype={cache_np.dtype}")
@@ -60,35 +64,15 @@ def load_score_cache(env: WordleEnv):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NUMPY VECTORISED ENVIRONMENT
+#  Reuse NumpyWordleEnv from train_cpu.py verbatim
 # ══════════════════════════════════════════════════════════════════════════════
 
 class NumpyWordleEnv:
-    """
-    Fully vectorised Wordle over N_ENVS parallel games.
-
-    Observation (float32, shape [n_envs, 313]):
-        [0  :26 ]  letter_gray       — letter confirmed absent
-        [26 :52 ]  letter_present    — letter confirmed present (yellow or green)
-        [52 :182]  letter_green      — 5x26: confirmed GREEN at position p
-        [182:312]  letter_yellow_not — 5x26: present but NOT at position p
-        [312:313]  step_frac         — step_num / 6
-
-    mask_prob (float, 0.0-1.0):
-        Per-env probability of applying the candidate mask each step.
-        Cosine-decayed 1.0 -> 0.0 over training.
-
-    test_indices (np.ndarray or None):
-        If provided, secrets are sampled only from these vocab indices.
-        Used for evaluation so secrets are always common words.
-        Training always uses full vocab for secrets.
-    """
-
     def __init__(self, base_env, score_cache_np, n_envs,
                  reward_config=None, test_indices=None):
-        self.n_envs      = n_envs
-        self.vocab_size  = base_env.vocab_size
-        self.test_indices = test_indices  # None = use full vocab for secrets
+        self.n_envs       = n_envs
+        self.vocab_size   = base_env.vocab_size
+        self.test_indices = test_indices
 
         if reward_config is None:
             self.win_rewards  = {1: 1.0, 2: 3.0, 3: 3.5, 4: 1.0, 5: 0.5, 6: -1.0}
@@ -100,7 +84,7 @@ class NumpyWordleEnv:
             self.step_penalty = reward_config["step_penalty"]
 
         self.score_cache = score_cache_np
-        self.mask_prob   = 1.0
+        self.mask_prob   = MASK_PROB  # always 0.0 for finetuning
 
         self.words_int = np.array(
             [[ord(c) - ord('a') for c in w] for w in base_env.words],
@@ -119,7 +103,6 @@ class NumpyWordleEnv:
         self.reset_all()
 
     def _sample_secrets(self, size):
-        """Sample secret indices — from test set if available, else full vocab."""
         if self.test_indices is not None:
             return np.random.choice(self.test_indices, size=size)
         return np.random.randint(0, self.vocab_size, size=size)
@@ -156,8 +139,8 @@ class NumpyWordleEnv:
         current_colors = np.stack([c0, c1, c2, c3, c4], axis=1)
 
         guess_letters = self.words_int[actions]
-
         env_ids = np.arange(self.n_envs)
+
         for pos in range(5):
             l_pos = guess_letters[:, pos]
             c_pos = current_colors[:, pos]
@@ -174,7 +157,6 @@ class NumpyWordleEnv:
             self.letter_present[env_ids[green_mask], l_pos[green_mask]]    = 1.0
             self.letter_green[env_ids[green_mask], pos, l_pos[green_mask]] = 1.0
 
-        # Always update internal candidate masks
         consistent = (
             self.score_cache[actions, :].astype(np.int32)
             == scores_encoded[:, None]
@@ -190,7 +172,6 @@ class NumpyWordleEnv:
         done = won | (self.step_nums >= 6)
 
         rewards = np.full(self.n_envs, self.step_penalty, dtype=np.float32)
-
         win_done  = won & done
         loss_done = (~won) & done
 
@@ -205,7 +186,6 @@ class NumpyWordleEnv:
         won_indices  = np.where(win_done)[0]
         lost_indices = np.where(loss_done)[0]
 
-        # Guess distribution: buckets 0-5 = solved on guess 1-6, bucket 6 = loss
         guess_counts = np.zeros(7, dtype=np.int32)
         if len(won_indices) > 0:
             for g in self.step_nums[won_indices]:
@@ -236,23 +216,11 @@ class NumpyWordleEnv:
             self.letter_green.reshape(self.n_envs, -1),
             self.letter_yellow_not.reshape(self.n_envs, -1),
             step_frac,
-        ], axis=1)  # (n_envs, 313)
+        ], axis=1)
 
     def _get_action_masks(self) -> np.ndarray:
-        """
-        Per-env blended mask based on mask_prob.
-        mask_prob=1.0 -> all scaffolded
-        mask_prob=0.0 -> all free (all-True mask)
-        """
-        if self.mask_prob >= 1.0:
-            return self.masks.copy()
-        if self.mask_prob <= 0.0:
-            return np.ones((self.n_envs, self.vocab_size), dtype=bool)
-
-        use_mask = np.random.random(self.n_envs) < self.mask_prob
-        blended  = np.ones((self.n_envs, self.vocab_size), dtype=bool)
-        blended[use_mask] = self.masks[use_mask]
-        return blended
+        # Always all-True during finetuning — no scaffolding
+        return np.ones((self.n_envs, self.vocab_size), dtype=bool)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,22 +228,22 @@ class NumpyWordleEnv:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def evaluate(net, eval_env: NumpyWordleEnv, n_games: int = 512) -> tuple[float, float]:
-    """
-    Deterministic rollout on the test set.
-    Always uses full candidate mask (mask_prob=1.0) for clean comparison.
-    Secrets are sampled from eval_env.test_indices (common words only).
-    """
-    prev_mask_prob       = eval_env.mask_prob
-    eval_env.mask_prob   = 1.0
+    """Deterministic eval on test set with full candidate mask."""
+    prev_mask_prob    = eval_env.mask_prob
+    eval_env.mask_prob = 1.0
     obs, masks = eval_env.reset_all()
     wins = 0
     dones = 0
     guesses_sum = 0.0
 
     while dones < n_games:
-        actions, _, _ = net.get_action(obs, masks, deterministic=True)
+        # Override masks to use candidate mask for eval
+        m_t = torch.as_tensor(eval_env.masks.copy(), dtype=torch.bool)
+        actions, _, _ = net.get_action(
+            torch.as_tensor(obs, dtype=torch.float32), m_t, deterministic=True
+        )
         obs, _, done, info = eval_env.step(actions)
-        masks = eval_env._get_action_masks()
+        masks = eval_env.masks.copy()
 
         wins        += info["wins"]
         dones       += info["dones"]
@@ -286,18 +254,25 @@ def evaluate(net, eval_env: NumpyWordleEnv, n_games: int = 512) -> tuple[float, 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Main Training Loop
+#  Finetuning Loop
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--name",   type=str, default="cpu_wordle")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to .pt checkpoint to finetune from")
+    parser.add_argument("--name",  type=str, default="finetune_nomask")
+    parser.add_argument("--iters", type=int, default=N_ITERATIONS,
+                        help="Number of finetuning iterations")
     args = parser.parse_args()
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cpu")
-    print(f"Using device: {device}  (NumPy vectorised env)")
+    print(f"Using device: {device}")
+    print(f"Finetuning from: {args.checkpoint}")
+    print(f"Mask: {MASK_PROB} (fully unscaffolded)")
+    print(f"LR:   {LR} -> {LR_MIN} (cosine decay)")
+    print(f"Ent:  {ENT_COEF} (fixed)")
 
     mlflow.set_experiment("Wordle_RL_CPU")
 
@@ -310,14 +285,14 @@ def main():
     base_env    = WordleEnv(DATA_DIR)
     score_cache = load_score_cache(base_env)
 
-    # Training env: secrets from full vocab
+    # Training: full vocab secrets, no mask
     vec_env = NumpyWordleEnv(
         base_env, score_cache, N_ENVS,
         reward_config=REWARD_CONFIG,
         test_indices=None
     )
 
-    # Eval env: secrets from test set (common words only)
+    # Eval: test set secrets, candidate mask on
     eval_env = NumpyWordleEnv(
         base_env, score_cache, N_ENVS,
         reward_config=REWARD_CONFIG,
@@ -325,8 +300,12 @@ def main():
     )
 
     net = WordleNetwork(base_env.obs_dim, base_env.vocab_size, hidden_dim=HIDDEN_DIM).to(device)
-    print(f"Network: obs_dim={base_env.obs_dim}, vocab={base_env.vocab_size}, hidden={HIDDEN_DIM}")
-    print(f"Eval set: {len(base_env.test_indices)} words")
+
+    if not os.path.exists(args.checkpoint):
+        print(f"Checkpoint not found: {args.checkpoint}")
+        return
+    net.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    print(f"Loaded checkpoint OK")
 
     import sys as _sys
     if _sys.platform in ("win32", "darwin"):
@@ -339,47 +318,24 @@ def main():
             print(f"torch.compile: skipped ({e})")
 
     optimizer = torch.optim.AdamW(net.parameters(), lr=LR, eps=1e-5, weight_decay=1e-4)
-
-    # LR: cosine warm restarts with doubling periods
-    # Restarts at iters 500, 1500, 3500 — frequent early when model needs
-    # to adapt quickly to loosening scaffolding, tapering off late.
-    # mask_prob cosine decay runs independently: 1.0 -> 0.0 over 5000 iters.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=500, T_mult=2, eta_min=1e-6
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.iters, eta_min=LR_MIN
     )
 
-    # ── Resume ────────────────────────────────────────────────────────
-    start_iter = 1
-    if args.resume:
-        print(f"--> Resuming from: {args.resume}")
-        if os.path.exists(args.resume):
-            net.load_state_dict(torch.load(args.resume, map_location=device))
-            m = re.search(r"(\d+)", args.resume)
-            if m:
-                start_iter = int(m.group(1)) + 1
-        else:
-            print(f"--> Checkpoint not found: {args.resume}")
-            return
-
-    run_desc = f"{args.name}_H{HIDDEN_DIM}_obs313_cosineMask_LR{LR}"
-    if args.resume:
-        run_desc += f"_Res{start_iter}"
+    run_desc = f"{args.name}_nomask_LR{LR}_Ent{ENT_COEF}"
     print(f"Starting run: {run_desc}")
 
     with mlflow.start_run(run_name=run_desc):
         mlflow.log_params({
             "name":          args.name,
+            "checkpoint":    args.checkpoint,
             "obs_dim":       base_env.obs_dim,
             "N_ENVS":        N_ENVS,
             "STEPS_PER_ENV": STEPS_PER_ENV,
-            "BATCH":         MINIBATCH_SIZE,
-            "N_ITERATIONS":  N_ITERATIONS,
+            "N_ITERATIONS":  args.iters,
             "LR":            LR,
-            "HIDDEN_DIM":    HIDDEN_DIM,
-            "ENT_START":     ENT_COEF_START,
-            "ENT_END":       ENT_COEF_END,
-            "LR_T0":         500,
-            "LR_T_mult":     2,
+            "ENT_COEF":      ENT_COEF,
+            "MASK_PROB":     MASK_PROB,
             "eval_set_size": len(base_env.test_indices),
             "rewards":       str(REWARD_CONFIG),
         })
@@ -389,15 +345,12 @@ def main():
         win_history = []
         guess_dist  = np.zeros(7, dtype=np.int32)
 
-        for iteration in range(start_iter, N_ITERATIONS + 1):
+        # Run eval on loaded checkpoint before any training
+        eval_win, eval_guess = evaluate(net, eval_env)
+        mlflow.log_metrics({"eval_win_rate": eval_win, "eval_avg_guesses": eval_guess}, step=0)
+        print(f"  -> BASELINE EVAL: Win {eval_win:.2%}  Avg guesses {eval_guess:.3f}")
 
-            # Linear entropy decay
-            progress = (iteration - 1) / max(N_ITERATIONS - 1, 1)
-            ent_coef = ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * progress
-
-            # Cosine mask decay: 1.0 -> 0.0 over N_ITERATIONS
-            mask_prob = 0.5 * (1.0 + math.cos(math.pi * (iteration - 1) / N_ITERATIONS))
-            vec_env.mask_prob = mask_prob
+        for iteration in range(1, args.iters + 1):
 
             # ── Collection ────────────────────────────────────────────
             mb_obs, mb_masks, mb_actions, mb_log_probs = [], [], [], []
@@ -501,7 +454,7 @@ def main():
                         F.mse_loss(v_clipped,   f_returns_norm[idx])
                     )
 
-                    loss = pg_loss + VF_COEF * vf_loss - ent_coef * entropy
+                    loss = pg_loss + VF_COEF * vf_loss - ENT_COEF * entropy
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -531,9 +484,7 @@ def main():
                 "pg_loss":      np.mean(epoch_pg_loss),
                 "vf_loss":      np.mean(epoch_vf_loss),
                 "entropy":      np.mean(epoch_entropy),
-                "ent_coef":     ent_coef,
                 "lr":           scheduler.get_last_lr()[0],
-                "mask_prob":    mask_prob,
             }
             for i, v in enumerate(dist_norm):
                 label = f"dist_guess_{i + 1}" if i < 6 else "dist_loss"
@@ -548,7 +499,6 @@ def main():
                     f"Iter {iteration:5d} | "
                     f"Win: {smooth_win:.2%} | "
                     f"Guess: {avg_guesses:.2f} | "
-                    f"Mask: {mask_prob:.3f} | "
                     f"LR: {metrics['lr']:.2e} | "
                     f"Ent: {metrics['entropy']:.3f} | "
                     f"t: {elapsed:.0f}s"
@@ -574,7 +524,7 @@ def main():
     state = getattr(net, "_orig_mod", net).state_dict()
     torch.save(state, final_path)
     mlflow.log_artifact(final_path)
-    print(f"Training complete. Model saved to {final_path}")
+    print(f"Finetuning complete. Model saved to {final_path}")
 
 
 if __name__ == "__main__":
