@@ -24,13 +24,13 @@ from agent.network import WordleNetwork
 DATA_DIR  = "data"
 MODEL_DIR = "models"
 
-N_ENVS         = 256
+N_ENVS         = 512
 STEPS_PER_ENV  = 16
 MINIBATCH_SIZE = 256
 N_ITERATIONS   = 5_000   # how many MORE iterations to train
 
 # Low LR — model is already trained, just sharpening
-LR     = 8e-6
+LR     = 2e-5
 LR_MIN = 1e-6
 
 GAMMA         = 0.99
@@ -43,7 +43,7 @@ MAX_GRAD_NORM = 0.5
 # Entropy kept low and flat — we want the policy to commit, not explore
 ENT_COEF = 0.002
 
-HIDDEN_DIM = 384
+HIDDEN_DIM = 768
 
 # No scaffolding — all envs guess freely from full vocab
 MASK_PROB = 0.0
@@ -259,7 +259,7 @@ def evaluate(net, eval_env: NumpyWordleEnv, n_games: int = 512) -> tuple[float, 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint to finetune from")
     parser.add_argument("--name",  type=str, default="finetune_nomask")
     parser.add_argument("--iters", type=int, default=N_ITERATIONS,
@@ -289,7 +289,7 @@ def main():
     vec_env = NumpyWordleEnv(
         base_env, score_cache, N_ENVS,
         reward_config=REWARD_CONFIG,
-        test_indices=None
+        test_indices=base_env.test_indices   # ← common words only
     )
 
     # Eval: test set secrets, candidate mask on
@@ -301,11 +301,14 @@ def main():
 
     net = WordleNetwork(base_env.obs_dim, base_env.vocab_size, hidden_dim=HIDDEN_DIM).to(device)
 
-    if not os.path.exists(args.checkpoint):
-        print(f"Checkpoint not found: {args.checkpoint}")
-        return
-    net.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    print(f"Loaded checkpoint OK")
+    if args.checkpoint:
+        if not os.path.exists(args.checkpoint):
+            print(f"Checkpoint not found: {args.checkpoint}")
+            return
+        net.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        print("Loaded checkpoint OK")
+    else:
+        print("No checkpoint provided — starting from scratch")
 
     import sys as _sys
     if _sys.platform in ("win32", "darwin"):
