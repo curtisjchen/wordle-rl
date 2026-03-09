@@ -259,29 +259,23 @@ class NumpyWordleEnv:
 #  Evaluation
 # ══════════════════════════════════════════════════════════════════════════════
 
-def evaluate(net, eval_env: NumpyWordleEnv, n_games: int = 512) -> tuple[float, float]:
-    """
-    Deterministic rollout on the test set.
-    Always uses full candidate mask (mask_prob=1.0) for clean comparison.
-    Secrets are sampled from eval_env.test_indices (common words only).
-    """
-    prev_mask_prob       = eval_env.mask_prob
-    eval_env.mask_prob   = 1.0
-    obs, masks = eval_env.reset_all()
-    wins = 0
-    dones = 0
-    guesses_sum = 0.0
+def evaluate(net, eval_env, n_games=512):
+    obs, _ = eval_env.reset_all()
+    wins, dones, guesses_sum = 0, 0, 0.0
 
     while dones < n_games:
-        actions, _, _ = net.get_action(obs, masks, deterministic=True)
+        # No mask — all-True, same as training
+        masks = np.ones((eval_env.n_envs, eval_env.vocab_size), dtype=bool)
+        actions, _, _ = net.get_action(
+            torch.as_tensor(obs, dtype=torch.float32),
+            torch.as_tensor(masks, dtype=torch.bool),
+            deterministic=True
+        )
         obs, _, done, info = eval_env.step(actions)
-        masks = eval_env._get_action_masks()
-
         wins        += info["wins"]
         dones       += info["dones"]
         guesses_sum += info["avg_guesses"] * info["dones"]
 
-    eval_env.mask_prob = prev_mask_prob
     return wins / dones, guesses_sum / dones
 
 
