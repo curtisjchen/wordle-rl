@@ -24,13 +24,12 @@ from agent.network import WordleNetwork
 DATA_DIR  = "data"
 MODEL_DIR = "models"
 
-N_ENVS         = 512
+N_ENVS         = 256
 STEPS_PER_ENV  = 16
 MINIBATCH_SIZE = 256
-N_ITERATIONS   = 5_000   # how many MORE iterations to train
+N_ITERATIONS   = 5_000
 
-# Low LR — model is already trained, just sharpening
-LR     = 2e-5
+LR     = 3e-5
 LR_MIN = 1e-6
 
 GAMMA         = 0.99
@@ -40,17 +39,59 @@ VF_COEF       = 0.5
 N_EPOCHS      = 4
 MAX_GRAD_NORM = 0.5
 
-# Entropy kept low and flat — we want the policy to commit, not explore
-ENT_COEF = 0.002
+ENT_COEF_START = 0.01
+ENT_COEF_END   = 0.001
 
-HIDDEN_DIM = 768
+HIDDEN_DIM = 384
+MASK_PROB  = 0.0   # no scaffolding — full free exploration
 
-# No scaffolding — all envs guess freely from full vocab
-MASK_PROB = 0.0
+# ── Intermediate rewards ───────────────────────────────────────────────────────
+# Per-step reward for NEW information gained this guess.
+# Keeps gradient signal flowing even on losing games.
+# Max possible: 5 new greens × 0.3 = 1.5 per step — small vs terminal rewards.
+GREEN_REWARD  = 0.3
+YELLOW_REWARD = 0.1
+
+# ── Fixed win rewards ──────────────────────────────────────────────────────────
+# Guesses 1-4 always strongly rewarded — sharp solving always good.
+WIN_REWARDS_FIXED = {1: 5.0, 2: 4.0, 3: 3.0, 4: 2.0}
+
+# ── Adaptive rewards — updated at eval time based on actual performance ────────
+#
+# Both guess 5/6 win rewards AND loss_reward scale together so that
+# intermediate green/yellow rewards are never drowned out early in training.
+#
+# avg_guesses   loss    guess5   guess6
+#     7.0        -1.0   +1.0     +1.0   <- struggling: celebrate anything
+#     6.0        -2.0   +0.75    +0.5
+#     5.0        -3.0   +0.5      0.0   <- decent: 6-guess wins break even
+#     4.0        -4.0   +0.25   -0.5
+#     3.0        -5.0    0.0    -1.0    <- excellent: only <=4 guess wins profit
+#
+# At avg_guesses=7.0 a losing game still gains from greens/yellows.
+# At avg_guesses=3.0 loss is harshly penalised — model must win and win fast.
 
 LOG_EVERY  = 1
 SAVE_EVERY = 500
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_adaptive_rewards(avg_guesses: float) -> tuple[dict, float]:
+    """
+    Returns (win_rewards dict, loss_reward float) scaled to current performance.
+    avg_guesses: 7.0 = never winning, 3.0 = excellent (both inclusive).
+    """
+    # Map avg_guesses 7.0->3.0 onto progress 0.0->1.0
+    progress = float(np.clip((7.0 - avg_guesses) / (7.0 - 3.0), 0.0, 1.0))
+
+    win_rewards = {
+        **WIN_REWARDS_FIXED,
+        5: 1.0 - 1.0 * progress,        # +1.0 -> 0.0
+        6: 1.0 - 2.0 * progress,        # +1.0 -> -1.0
+    }
+    loss_reward = -1.0 - 4.0 * progress  # -1.0 -> -5.0
+
+    return win_rewards, loss_reward
 
 
 def load_score_cache(env: WordleEnv):
@@ -64,27 +105,28 @@ def load_score_cache(env: WordleEnv):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Reuse NumpyWordleEnv from train_cpu.py verbatim
+#  Vectorised environment
 # ══════════════════════════════════════════════════════════════════════════════
 
 class NumpyWordleEnv:
-    def __init__(self, base_env, score_cache_np, n_envs,
-                 reward_config=None, test_indices=None):
+    """
+    Vectorised Wordle with:
+      - Intermediate green/yellow rewards every step for new information
+      - Adaptive win rewards + loss reward (both updated via set_rewards())
+      - No mask — full free exploration
+      - Secrets from test_indices (common words) if provided
+    """
+
+    def __init__(self, base_env, score_cache_np, n_envs, test_indices=None):
         self.n_envs       = n_envs
         self.vocab_size   = base_env.vocab_size
         self.test_indices = test_indices
+        self.mask_prob    = MASK_PROB
 
-        if reward_config is None:
-            self.win_rewards  = {1: 1.0, 2: 3.0, 3: 3.5, 4: 1.0, 5: 0.5, 6: -1.0}
-            self.loss_reward  = -5.0
-            self.step_penalty = -0.1
-        else:
-            self.win_rewards  = reward_config["win_rewards"]
-            self.loss_reward  = reward_config["loss_reward"]
-            self.step_penalty = reward_config["step_penalty"]
+        # Initialise rewards at worst-case performance (wide goalposts)
+        self.win_rewards, self.loss_reward = get_adaptive_rewards(7.0)
 
         self.score_cache = score_cache_np
-        self.mask_prob   = MASK_PROB  # always 0.0 for finetuning
 
         self.words_int = np.array(
             [[ord(c) - ord('a') for c in w] for w in base_env.words],
@@ -101,6 +143,10 @@ class NumpyWordleEnv:
         self.letter_yellow_not = np.zeros((n_envs, 5, 26), dtype=np.float32)
 
         self.reset_all()
+
+    def set_rewards(self, avg_guesses: float):
+        """Update win and loss rewards based on current eval performance."""
+        self.win_rewards, self.loss_reward = get_adaptive_rewards(avg_guesses)
 
     def _sample_secrets(self, size):
         if self.test_indices is not None:
@@ -141,6 +187,13 @@ class NumpyWordleEnv:
         guess_letters = self.words_int[actions]
         env_ids = np.arange(self.n_envs)
 
+        # Snapshot knowledge before update to count NEW information only
+        prev_green_count  = self.letter_green.sum(axis=(1, 2))
+        prev_yellow_count = np.clip(
+            self.letter_present - self.letter_green.max(axis=1), 0, None
+        ).sum(axis=1)
+
+        # Update knowledge state
         for pos in range(5):
             l_pos = guess_letters[:, pos]
             c_pos = current_colors[:, pos]
@@ -157,12 +210,26 @@ class NumpyWordleEnv:
             self.letter_present[env_ids[green_mask], l_pos[green_mask]]    = 1.0
             self.letter_green[env_ids[green_mask], pos, l_pos[green_mask]] = 1.0
 
+        new_green_count  = self.letter_green.sum(axis=(1, 2))
+        new_yellow_count = np.clip(
+            self.letter_present - self.letter_green.max(axis=1), 0, None
+        ).sum(axis=1)
+
+        new_greens  = np.clip(new_green_count  - prev_green_count,  0, None)
+        new_yellows = np.clip(new_yellow_count - prev_yellow_count, 0, None)
+
+        # Intermediate reward: dense signal every step
+        rewards = (
+            GREEN_REWARD  * new_greens +
+            YELLOW_REWARD * new_yellows
+        ).astype(np.float32)
+
+        # Update candidate masks
         consistent = (
             self.score_cache[actions, :].astype(np.int32)
             == scores_encoded[:, None]
         )
         self.masks &= consistent
-
         empty_rows = self.masks.sum(axis=1) == 0
         if np.any(empty_rows):
             self.masks[empty_rows] = True
@@ -171,10 +238,10 @@ class NumpyWordleEnv:
         won  = (scores_encoded == 242)
         done = won | (self.step_nums >= 6)
 
-        rewards = np.full(self.n_envs, self.step_penalty, dtype=np.float32)
         win_done  = won & done
         loss_done = (~won) & done
 
+        # Terminal rewards on top of intermediate
         if np.any(win_done):
             rewards[win_done] += np.array(
                 [self.win_rewards[s] for s in self.step_nums[win_done]],
@@ -219,85 +286,64 @@ class NumpyWordleEnv:
         ], axis=1)
 
     def _get_action_masks(self) -> np.ndarray:
-        # Always all-True during finetuning — no scaffolding
         return np.ones((self.n_envs, self.vocab_size), dtype=bool)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Evaluation
+#  Evaluation — deterministic, no mask
 # ══════════════════════════════════════════════════════════════════════════════
 
 def evaluate(net, eval_env: NumpyWordleEnv, n_games: int = 512) -> tuple[float, float]:
-    """Deterministic eval on test set with full candidate mask."""
-    prev_mask_prob    = eval_env.mask_prob
-    eval_env.mask_prob = 1.0
-    obs, masks = eval_env.reset_all()
-    wins = 0
-    dones = 0
-    guesses_sum = 0.0
+    obs, _ = eval_env.reset_all()
+    wins, dones, guesses_sum = 0, 0, 0.0
 
     while dones < n_games:
-        # Override masks to use candidate mask for eval
-        m_t = torch.as_tensor(eval_env.masks.copy(), dtype=torch.bool)
+        masks = np.ones((eval_env.n_envs, eval_env.vocab_size), dtype=bool)
         actions, _, _ = net.get_action(
-            torch.as_tensor(obs, dtype=torch.float32), m_t, deterministic=True
+            torch.as_tensor(obs, dtype=torch.float32),
+            torch.as_tensor(masks, dtype=torch.bool),
+            deterministic=True
         )
         obs, _, done, info = eval_env.step(actions)
-        masks = eval_env.masks.copy()
-
         wins        += info["wins"]
         dones       += info["dones"]
         guesses_sum += info["avg_guesses"] * info["dones"]
 
-    eval_env.mask_prob = prev_mask_prob
     return wins / dones, guesses_sum / dones
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Finetuning Loop
+#  Main
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to .pt checkpoint to finetune from")
+                        help="Path to .pt checkpoint (omit to train from scratch)")
     parser.add_argument("--name",  type=str, default="finetune_nomask")
-    parser.add_argument("--iters", type=int, default=N_ITERATIONS,
-                        help="Number of finetuning iterations")
+    parser.add_argument("--iters", type=int, default=N_ITERATIONS)
     args = parser.parse_args()
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cpu")
+
     print(f"Using device: {device}")
-    print(f"Finetuning from: {args.checkpoint}")
-    print(f"Mask: {MASK_PROB} (fully unscaffolded)")
-    print(f"LR:   {LR} -> {LR_MIN} (cosine decay)")
-    print(f"Ent:  {ENT_COEF} (fixed)")
+    print(f"Mask:    {MASK_PROB} (no scaffolding)")
+    print(f"LR:      {LR} -> {LR_MIN} (cosine decay)")
+    print(f"Entropy: {ENT_COEF_START} -> {ENT_COEF_END} (linear decay)")
+    print(f"Rewards: +{GREEN_REWARD}/new green  +{YELLOW_REWARD}/new yellow  (per step)")
+    print(f"         adaptive win/loss — tighten as eval avg_guesses improves")
+    print(f"Secrets: common words only\n")
 
     mlflow.set_experiment("Wordle_RL_CPU")
-
-    REWARD_CONFIG = {
-        "win_rewards":  {1: 1.0, 2: 2.0, 3: 3.5, 4: 2.0, 5: 0.5, 6: -1.0},
-        "loss_reward":  -5.0,
-        "step_penalty": -0.0,
-    }
 
     base_env    = WordleEnv(DATA_DIR)
     score_cache = load_score_cache(base_env)
 
-    # Training: full vocab secrets, no mask
-    vec_env = NumpyWordleEnv(
-        base_env, score_cache, N_ENVS,
-        reward_config=REWARD_CONFIG,
-        test_indices=base_env.test_indices   # ← common words only
-    )
-
-    # Eval: test set secrets, candidate mask on
-    eval_env = NumpyWordleEnv(
-        base_env, score_cache, N_ENVS,
-        reward_config=REWARD_CONFIG,
-        test_indices=base_env.test_indices
-    )
+    vec_env  = NumpyWordleEnv(base_env, score_cache, N_ENVS,
+                               test_indices=base_env.test_indices)
+    eval_env = NumpyWordleEnv(base_env, score_cache, N_ENVS,
+                               test_indices=base_env.test_indices)
 
     net = WordleNetwork(base_env.obs_dim, base_env.vocab_size, hidden_dim=HIDDEN_DIM).to(device)
 
@@ -306,9 +352,9 @@ def main():
             print(f"Checkpoint not found: {args.checkpoint}")
             return
         net.load_state_dict(torch.load(args.checkpoint, map_location=device))
-        print("Loaded checkpoint OK")
+        print(f"Loaded checkpoint: {args.checkpoint}")
     else:
-        print("No checkpoint provided — starting from scratch")
+        print("No checkpoint — starting from scratch")
 
     import sys as _sys
     if _sys.platform in ("win32", "darwin"):
@@ -325,22 +371,24 @@ def main():
         optimizer, T_max=args.iters, eta_min=LR_MIN
     )
 
-    run_desc = f"{args.name}_nomask_LR{LR}_Ent{ENT_COEF}"
-    print(f"Starting run: {run_desc}")
+    run_desc = f"{args.name}_nomask_adaptreward_LR{LR}"
+    print(f"\nStarting run: {run_desc}\n")
 
     with mlflow.start_run(run_name=run_desc):
         mlflow.log_params({
             "name":          args.name,
-            "checkpoint":    args.checkpoint,
+            "checkpoint":    args.checkpoint or "scratch",
             "obs_dim":       base_env.obs_dim,
             "N_ENVS":        N_ENVS,
             "STEPS_PER_ENV": STEPS_PER_ENV,
             "N_ITERATIONS":  args.iters,
             "LR":            LR,
-            "ENT_COEF":      ENT_COEF,
-            "MASK_PROB":     MASK_PROB,
+            "ENT_START":     ENT_COEF_START,
+            "ENT_END":       ENT_COEF_END,
+            "GREEN_REWARD":  GREEN_REWARD,
+            "YELLOW_REWARD": YELLOW_REWARD,
             "eval_set_size": len(base_env.test_indices),
-            "rewards":       str(REWARD_CONFIG),
+            "secret_source": "common_words",
         })
 
         obs, masks = vec_env.reset_all()
@@ -348,12 +396,19 @@ def main():
         win_history = []
         guess_dist  = np.zeros(7, dtype=np.int32)
 
-        # Run eval on loaded checkpoint before any training
+        # Baseline eval — sets initial rewards based on actual checkpoint quality
         eval_win, eval_guess = evaluate(net, eval_env)
+        vec_env.set_rewards(eval_guess)
         mlflow.log_metrics({"eval_win_rate": eval_win, "eval_avg_guesses": eval_guess}, step=0)
         print(f"  -> BASELINE EVAL: Win {eval_win:.2%}  Avg guesses {eval_guess:.3f}")
+        print(f"     Rewards set: loss={vec_env.loss_reward:.2f}  "
+              f"guess5={vec_env.win_rewards[5]:+.2f}  "
+              f"guess6={vec_env.win_rewards[6]:+.2f}\n")
 
         for iteration in range(1, args.iters + 1):
+
+            progress = (iteration - 1) / max(args.iters - 1, 1)
+            ent_coef = ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * progress
 
             # ── Collection ────────────────────────────────────────────
             mb_obs, mb_masks, mb_actions, mb_log_probs = [], [], [], []
@@ -457,7 +512,7 @@ def main():
                         F.mse_loss(v_clipped,   f_returns_norm[idx])
                     )
 
-                    loss = pg_loss + VF_COEF * vf_loss - ENT_COEF * entropy
+                    loss = pg_loss + VF_COEF * vf_loss - ent_coef * entropy
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -487,7 +542,11 @@ def main():
                 "pg_loss":      np.mean(epoch_pg_loss),
                 "vf_loss":      np.mean(epoch_vf_loss),
                 "entropy":      np.mean(epoch_entropy),
+                "ent_coef":     ent_coef,
                 "lr":           scheduler.get_last_lr()[0],
+                "loss_reward":  vec_env.loss_reward,
+                "win_reward_5": vec_env.win_rewards[5],
+                "win_reward_6": vec_env.win_rewards[6],
             }
             for i, v in enumerate(dist_norm):
                 label = f"dist_guess_{i + 1}" if i < 6 else "dist_loss"
@@ -504,6 +563,7 @@ def main():
                     f"Guess: {avg_guesses:.2f} | "
                     f"LR: {metrics['lr']:.2e} | "
                     f"Ent: {metrics['entropy']:.3f} | "
+                    f"R5/R6/L: {vec_env.win_rewards[5]:+.2f}/{vec_env.win_rewards[6]:+.2f}/{vec_env.loss_reward:.2f} | "
                     f"t: {elapsed:.0f}s"
                 )
                 print(f"         Dist  1     2     3     4     5     6     L")
@@ -511,11 +571,20 @@ def main():
 
             if iteration % 250 == 0:
                 eval_win, eval_guess = evaluate(net, eval_env)
+                # Update rewards based on new performance
+                vec_env.set_rewards(eval_guess)
                 mlflow.log_metrics(
-                    {"eval_win_rate": eval_win, "eval_avg_guesses": eval_guess},
+                    {"eval_win_rate":  eval_win,
+                     "eval_avg_guesses": eval_guess,
+                     "loss_reward":    vec_env.loss_reward,
+                     "win_reward_5":   vec_env.win_rewards[5],
+                     "win_reward_6":   vec_env.win_rewards[6]},
                     step=iteration
                 )
-                print(f"  -> EVAL (test set): Win {eval_win:.2%}  Avg guesses {eval_guess:.3f}")
+                print(f"  -> EVAL: Win {eval_win:.2%}  Avg guesses {eval_guess:.3f}")
+                print(f"     Rewards updated: loss={vec_env.loss_reward:.2f}  "
+                      f"guess5={vec_env.win_rewards[5]:+.2f}  "
+                      f"guess6={vec_env.win_rewards[6]:+.2f}")
 
             if iteration % SAVE_EVERY == 0:
                 path  = f"{MODEL_DIR}/{args.name}_{iteration}.pt"
@@ -527,7 +596,7 @@ def main():
     state = getattr(net, "_orig_mod", net).state_dict()
     torch.save(state, final_path)
     mlflow.log_artifact(final_path)
-    print(f"Finetuning complete. Model saved to {final_path}")
+    print(f"\nFinetuning complete. Model saved to {final_path}")
 
 
 if __name__ == "__main__":
