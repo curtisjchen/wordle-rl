@@ -178,6 +178,8 @@ def main():
                         help="The iteration number to start counting from (useful for resuming)")
     parser.add_argument("--iters", type=int, default=5000, 
                         help="Number of iterations to run THIS session")
+    parser.add_argument("--name", type=str, default="wordle",
+                        help="Base name for saved models (e.g., 'wordle')")
     
     args = parser.parse_args()
 
@@ -195,26 +197,6 @@ def main():
     # --- 1. CHECKPOINT LOADING ---
     if args.load:
         load_path = args.checkpoint
-        
-        # If no explicit checkpoint was provided, find the highest one for this phase
-        if load_path is None:
-            import glob
-            import re
-            
-            # Find all files matching this phase (e.g., wordle_phase1_it*.pt)
-            pattern = os.path.join(MODEL_DIR, f"wordle_phase{args.phase}_it*.pt")
-            checkpoints = glob.glob(pattern)
-            
-            if checkpoints:
-                # Extract the integer 'X' from '_itX.pt' and find the max
-                def get_iter(filepath):
-                    match = re.search(r"_it(\d+)\.pt$", filepath)
-                    return int(match.group(1)) if match else -1
-                
-                load_path = max(checkpoints, key=get_iter)
-            else:
-                load_path = f"{MODEL_DIR}/wordle_phase{args.phase}_it0.pt" # Fallback that won't exist
-
         if os.path.exists(load_path):
             print(f" [INFO] Loading checkpoint from {load_path}...")
             net.load_state_dict(torch.load(load_path, map_location=torch.device('cpu'), weights_only=True))
@@ -253,6 +235,7 @@ def main():
             
             # --- Linear Decay Scheduler ---
             frac = 1.0 - (iteration - 1.0) / N_ITERATIONS
+            frac = max(0, frac)
             current_lr = MIN_LR + (LR - MIN_LR) * frac
             current_ent = max(0.001, ENT_COEF * frac)
             
@@ -373,6 +356,7 @@ def main():
                 
                 mlflow.log_metric("avg_reward", avg_rew, step=iteration)
                 mlflow.log_metric("entropy_coef", current_ent, step=iteration)
+                mlflow.log_metric("learning_rate", current_lr, step=iteration)
 
                 mlflow.log_metric("policy_entropy", actual_entropy, step=iteration)
                 mlflow.log_metric("value_loss", actual_vf_loss, step=iteration) # <--- NEW
@@ -386,10 +370,12 @@ def main():
                 log_guesses = []
                 # --------------------------------
 
-            if iteration % 100 == 0:
+            SAVE_FREQ = 25
+            if iteration % SAVE_FREQ == 0:
                 # Dynamically insert the phase number into the filename
-                save_path = f"{MODEL_DIR}/wordle_phase{args.phase}_it{iteration}.pt"
+                save_path = f"{MODEL_DIR}/{args.name}_phase{args.phase}_it{iteration}.pt"
                 torch.save(net.state_dict(), save_path)
+                print(f" [SAVED] Checkpoint successfully written to {save_path}")
 
 if __name__ == "__main__":
     main()

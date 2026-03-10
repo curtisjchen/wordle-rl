@@ -125,4 +125,4 @@ def evaluate(model_path, num_games=100):
 
 if __name__ == "__main__":
     # Point this to your best saved model!
-    evaluate("models/wordle_it200.pt", num_games=10)
+    evaluate("models/wordle_it400.pt", num_games=10)
