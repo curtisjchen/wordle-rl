@@ -1,124 +1,76 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Categorical
 import numpy as np
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """Orthogonal initialization for PPO stability."""
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.ln = nn.LayerNorm(dim)
+        self.fc = nn.Linear(dim, dim)
+        self.activation = nn.ELU()
+
+    def forward(self, x):
+        residual = x
+        x = self.ln(x)
+        x = self.fc(x)
+        x = self.activation(x)
+        return x + residual
 
 class WordleNetwork(nn.Module):
-    """
-    Fast MLP Actor-Critic for Wordle.
-
-    Replaces the previous transformer architecture with a 3-layer MLP.
-    Reasons:
-      - Input is now a 183-dim float knowledge-state (not raw tile indices),
-        so learned attention over tile positions adds no value.
-      - MLP forward passes are ~5-10x faster on CPU for this input size.
-      - The knowledge-state representation already encodes the relational
-        information the transformer was trying to learn (e.g. "A is absent").
-
-    Architecture:
-        Linear(obs_dim → hidden) → ReLU
-        Linear(hidden → hidden)  → ReLU
-        Linear(hidden → hidden//2) → ReLU
-              ↓                 ↓
-        policy_head          value_head
-        Linear(→vocab_size)  Linear(→1)
-    """
-
-    def __init__(self, obs_dim: int, vocab_size: int, hidden_dim: int = 512):
+    def __init__(self, input_dim, action_dim, hidden_dim=1024):
         super().__init__()
-
-        self.vocab_size = vocab_size
-        mid = hidden_dim // 2
-
-        self.shared = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, mid), nn.ReLU(),
+        
+        # 1. Independent Actor (Policy)
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(input_dim, hidden_dim)),
+            nn.ELU(),
+            ResidualBlock(hidden_dim),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.ELU(),
+            layer_init(nn.Linear(hidden_dim, action_dim), std=0.01) # Small std for exploration
+        )
+        
+        # 2. Independent Critic (Value)
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(input_dim, hidden_dim)),
+            nn.ELU(),
+            ResidualBlock(hidden_dim),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.ELU(),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0)
         )
 
-        self.policy_head = nn.Linear(mid, vocab_size)
-        self.value_head  = nn.Linear(mid, 1)
-
-        self._init_weights()
-
-    # ------------------------------------------------------------------ #
-    #  Weight initialisation (orthogonal — standard for PPO)             #
-    # ------------------------------------------------------------------ #
-
-    def _init_weights(self):
-        for layer in self.shared:
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
-                nn.init.zeros_(layer.bias)
-
-        nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
-        nn.init.zeros_(self.policy_head.bias)
-        nn.init.orthogonal_(self.value_head.weight, gain=1.0)
-        nn.init.zeros_(self.value_head.bias)
-
-    # ------------------------------------------------------------------ #
-    #  Forward                                                             #
-    # ------------------------------------------------------------------ #
-
-    def forward(self, obs: torch.Tensor, mask: torch.Tensor = None):
-        """
-        Args:
-            obs:  (B, 183) float32 knowledge-state tensor.
-            mask: (B, vocab_size) bool — True for valid (guessable) actions.
-
-        Returns:
-            logits: (B, vocab_size)  — raw policy scores (invalid actions = -1e8)
-            values: (B,)             — state-value estimates
-        """
-        x      = self.shared(obs.float())
-        logits = self.policy_head(x)
-        values = self.value_head(x).squeeze(-1)
-
+    def forward(self, x, mask=None):
+        logits = self.actor(x)
+        value = self.critic(x)
+        
         if mask is not None:
-            logits = logits.masked_fill(~mask, -1e8)
+            # Safer negative constant to avoid NaN in log_softmax/mixed precision
+            logits = torch.where(mask, logits, torch.tensor(-1e8).to(logits.device))
+            
+        return logits, value
 
-        return logits, values
-
-    # ------------------------------------------------------------------ #
-    #  Inference helper (no grad, handles numpy / batching)              #
-    # ------------------------------------------------------------------ #
-
-    @torch.no_grad()
-    def get_action(self, obs, mask, deterministic: bool = False):
+    def get_action(self, obs, mask=None, deterministic=False):
         """
-        Convenience wrapper for rollout collection and evaluation.
-        Accepts numpy arrays or tensors, batched or single observations.
-
-        Returns numpy arrays: (actions, log_probs, values)
+        Helper for collection and evaluation.
+        Handles masking and distribution sampling in one call.
         """
-        device = next(self.parameters()).device
-
-        # -- obs --
-        if isinstance(obs, np.ndarray):
-            obs = torch.tensor(obs, dtype=torch.float32, device=device)
-        else:
-            obs = obs.float().to(device)
-
-        # -- mask --
-        if isinstance(mask, np.ndarray):
-            mask = torch.tensor(mask, dtype=torch.bool, device=device)
-        else:
-            mask = mask.bool().to(device)
-
-        # Handle unbatched single observations
-        if obs.dim() == 1:
-            obs  = obs.unsqueeze(0)
-            mask = mask.unsqueeze(0)
-
-        logits, values = self(obs, mask)
-
+        logits, value = self.forward(obs, mask)
+        
         if deterministic:
-            actions = logits.argmax(dim=-1)
-        else:
-            actions = torch.distributions.Categorical(logits=logits).sample()
-
-        log_probs = F.log_softmax(logits, dim=-1)
-        chosen_lp = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
-
-        return actions.cpu().numpy(), chosen_lp.cpu().numpy(), values.cpu().numpy()
+            action = torch.argmax(logits, dim=-1)
+            return action, None, value
+        
+        dist = Categorical(logits=logits)
+        action = dist.sample()
+        log_prob = dist.log_prob(action)
+        
+        return action, log_prob, value
