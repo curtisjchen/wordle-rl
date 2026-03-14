@@ -1,41 +1,52 @@
-import numpy as np
+import sys
 import os
+
+# --- PATH SETUP ---
+script_dir   = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.append(project_root)
+# ------------------
+
+import numpy as np
 import time
 
-DATA_DIR       = "data"
-MODEL_DIR      = "models"
+DATA_DIR  = "data"
+MODEL_DIR = "models"
 
 from env.wordle_env import WordleEnv
 
 def build_score_cache(env: WordleEnv) -> np.ndarray:
-    """Pre-computes 3^5 scores for every word pair."""
+    """
+    Builds a rectangular cache of shape (all_words x candidate_secrets).
+    - Rows  = any word the agent might guess (14.5k)
+    - Cols  = only candidate secret words (2.3k)
+    This single cache supports both curriculum phases.
+    """
     cache_path = os.path.join(DATA_DIR, "score_cache.npy")
-
     if os.path.exists(cache_path):
         print(" Loading score cache...", end=" ", flush=True)
         cache = np.load(cache_path)
         print(f"OK {cache.shape}")
         return cache
 
-    # env.guesses = 14,000 allowed words
-    # env.secrets = 2,700 possible answers
-    num_guesses = len(env.guesses)
-    num_secrets = len(env.secrets)
-    
-    print(f" Building score cache ({num_guesses}x{num_secrets})...")
+    all_words       = env.words                          # 14.5k
+    secret_indices  = env.test_indices                   # indices into all_words for candidates
+    secret_words    = [all_words[i] for i in secret_indices]  # 2.3k
+
+    num_guesses = len(all_words)
+    num_secrets = len(secret_words)
+    print(f" Building score cache ({num_guesses} guesses x {num_secrets} secrets)...")
+
     t0    = time.time()
-    
-    # Non-square matrix
     cache = np.zeros((num_guesses, num_secrets), dtype=np.uint8)
 
-    for g_idx, guess in enumerate(env.guesses):
-        for s_idx, secret in enumerate(env.secrets):
+    for g_idx, guess in enumerate(all_words):
+        for s_idx, secret in enumerate(secret_words):
             colors  = WordleEnv._score(guess, secret)
-            # Encode [2,0,1,0,0] -> scalar 0-242
             encoded = sum(c * (3 ** i) for i, c in enumerate(colors))
             cache[g_idx, s_idx] = encoded
 
-    np.save(cache_path, cache)
+    np.save(cache_path, cache)  # outside both loops
     print(f" Done in {(time.time()-t0):.1f}s.")
     return cache
 

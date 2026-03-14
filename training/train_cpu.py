@@ -21,20 +21,20 @@ from env.wordle_env import WordleEnv
 from agent.network import WordleNetwork
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
-N_ENVS         = 64         # Decreased parallel games to offset horizon
-STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
-MINIBATCH_SIZE = 2048       # Size of SGD chunks
+N_ENVS         = 32 # Decreased parallel games to offset horizon
+STEPS_PER_ENV  = 60        # Increased horizon (Batch size = 8192)
+MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4  # Size of SGD chunks
 N_EPOCHS       = 4          # PPO epochs per update
 N_ITERATIONS   = 50000      # Total training iterations
 
-LR             = 3e-4       # Starting learning rate (will decay)
+LR             = 1e-4       # Starting learning rate (will decay)
 MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
-ENT_COEF       = 0.1       # Starting exploration bonus (will decay)
+ENT_COEF       = 0.3       # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
-INFO_COEF      = 0.1        # Information Gain reward weight
+INFO_COEF      = 0.3        # Information Gain reward weight
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
 
 LOG_EVERY = 1
@@ -44,56 +44,67 @@ MODEL_DIR      = "models"
 
 CURRICULUM_PHASE = 1           # 1 = Only guess candidate secrets (2.3k), 2 = All words (14k)
 LOAD_CHECKPOINT  = False       # Set to True when moving to Phase 2 (or resuming)
-CHECKPOINT_PATH  = "models/wordle_it1000.pt"
 # ──────────────────────────────────────────────────────────────────────────────
 
 class NumpyWordleEnv:
-    """Fully vectorized Wordle logic for high-speed CPU training."""
-    def __init__(self, base_env, score_cache_np, n_envs, test_indices=None):
-        self.n_envs = n_envs
-        self.vocab_size = base_env.vocab_size
-        self.test_indices = test_indices
-        self.score_cache = score_cache_np
-        
-        # Pre-decoded color cache (Vocab, Vocab, 5)
-        self.color_cache = np.zeros((self.vocab_size, self.vocab_size, 5), dtype=np.uint8)
+    def __init__(self, base_env, score_cache_np, n_envs):
+        self.n_envs      = n_envs
+        self.vocab_size  = base_env.vocab_size
+        self.n_secrets   = score_cache_np.shape[1]
+        self.score_cache = score_cache_np               # (vocab_size x n_secrets)
+
+        # Maps vocab index -> secret index (-1 if not a candidate secret)
+        self.vocab_to_secret = np.full(self.vocab_size, -1, dtype=np.int32)
+        for s_idx, v_idx in enumerate(base_env.test_indices):
+            self.vocab_to_secret[v_idx] = s_idx
+
+        self.color_cache = np.zeros((self.vocab_size, self.n_secrets, 5), dtype=np.uint8)
         temp = score_cache_np.copy()
         for i in range(5):
             self.color_cache[:, :, i] = temp % 3
             temp //= 3
 
-        self.words_int = np.array([[ord(c)-ord('a') for c in w] for w in base_env.words])
+        self.words_int = np.array(
+            [[ord(c) - ord('a') for c in w] for w in base_env.words]
+        )
         self.reset_all()
 
     def _sample_secrets(self, size):
-        pool = self.test_indices if self.test_indices is not None else self.vocab_size
-        return np.random.choice(pool, size)
+        return np.random.randint(0, self.n_secrets, size=size)
 
     def reset_all(self):
-        self.secret_idxs = self._sample_secrets(self.n_envs)
-        self.step_nums = np.zeros(self.n_envs, dtype=np.int32)
-        self.masks = np.ones((self.n_envs, self.vocab_size), dtype=bool)
-        self.min_counts = np.zeros((self.n_envs, 26), dtype=np.float32)
-        self.max_counts = np.ones((self.n_envs, 26), dtype=np.float32) * 5.0
-        self.letter_green = np.zeros((self.n_envs, 5, 26), dtype=np.float32)
+        self.secret_idxs       = self._sample_secrets(self.n_envs)
+        self.step_nums         = np.zeros(self.n_envs, dtype=np.int32)
+        self.masks             = np.ones((self.n_envs, self.n_secrets), dtype=bool)  # now n_secrets wide
+        self.min_counts        = np.zeros((self.n_envs, 26), dtype=np.float32)
+        self.max_counts        = np.ones((self.n_envs, 26), dtype=np.float32) * 5.0
+        self.letter_green      = np.zeros((self.n_envs, 5, 26), dtype=np.float32)
         self.letter_yellow_not = np.zeros((self.n_envs, 5, 26), dtype=np.float32)
         return self._get_obs()
 
     def step(self, actions):
         current_colors = self.color_cache[actions, self.secret_idxs]
-        guess_letters = self.words_int[actions]
+        guess_letters  = self.words_int[actions]
         encoded_scores = self.score_cache[actions, self.secret_idxs]
-        
-        # --- 1. Check validity BEFORE mutating the masks ---
-        was_valid = self.masks[np.arange(self.n_envs), actions].copy()
-        # ---------------------------------------------------
 
-        # Calculate Information Gain
+        # was_valid: action must map to a candidate secret AND still be in mask
+        secret_action_idxs = self.vocab_to_secret[actions]          # vocab -> secret idx (-1 if not candidate)
+        is_candidate = secret_action_idxs >= 0
+        env_ids = np.arange(self.n_envs)
+        was_valid = np.zeros(self.n_envs, dtype=bool)
+        was_valid[is_candidate] = self.masks[env_ids[is_candidate], secret_action_idxs[is_candidate]]
+
+        # Information gain over n_secrets axis
         words_before = self.masks.sum(axis=1)
-        for i in range(self.n_envs):
-            self.masks[i] &= (self.score_cache[actions[i]] == encoded_scores[i])
+        
+        action_scores = self.score_cache[actions]  # (n_envs, n_secrets)
+        encoded_scores_expanded = encoded_scores[:, None]  # (n_envs, 1)
+        
+        self.masks &= (action_scores == encoded_scores_expanded)
+        
         words_after = self.masks.sum(axis=1)
-        info_gain = np.log2(words_before + 1) - np.log2(words_after + 1)
+        info_gain = np.log2(words_before + 1) - np.log2(words_after + 1)  # keep for logging
+        progress_reward = np.log2(self.n_secrets + 1) - np.log2(words_after + 1)
         
         # Update Observation state
         env_ids = np.arange(self.n_envs)
@@ -102,13 +113,16 @@ class NumpyWordleEnv:
             self.letter_yellow_not[env_ids[c==1], p, l[c==1]] = 1.0
             self.letter_green[env_ids[c==2], p, l[c==2]] = 1.0
 
-        for char_code in range(26):
-            l_mask = (guess_letters == char_code)
-            total_g = l_mask.sum(axis=1)
-            colored_g = (l_mask & (current_colors > 0)).sum(axis=1)
-            self.min_counts[:, char_code] = np.maximum(self.min_counts[:, char_code], colored_g)
-            ceiling_found = total_g > colored_g
-            self.max_counts[ceiling_found, char_code] = colored_g[ceiling_found]
+        
+        char_one_hot = (guess_letters[:, :, None] == np.arange(26))  # (n_envs, 5, 26)
+        colored = (current_colors > 0)[:, :, None]                   # (n_envs, 5, 1)
+
+        total_g   = char_one_hot.sum(axis=1)                         # (n_envs, 26)
+        colored_g = (char_one_hot & colored).sum(axis=1)             # (n_envs, 26)
+
+        self.min_counts = np.maximum(self.min_counts, colored_g)
+        ceiling_found = total_g > colored_g
+        self.max_counts = np.where(ceiling_found, colored_g, self.max_counts)
 
         self.step_nums += 1
         won = (encoded_scores == 242)
@@ -119,13 +133,14 @@ class NumpyWordleEnv:
         rewards = np.full(self.n_envs, -0.05, dtype=np.float32) 
         
         # Add info gain (only if it was a valid guess, to prevent hacking)
-        rewards += (info_gain * INFO_COEF) * was_valid 
+        rewards += (info_gain * INFO_COEF) * was_valid
         
         # Penalize guessing words we already know are wrong
-        rewards[~was_valid] -= 0.5 
+        rewards[~was_valid] -= 1.5 
         
-        rewards[won] += 2.0
-        rewards[(~won) & done] -= 5.0
+        guesses_remaining = 6 - self.step_nums  # 0 if won on last guess, 5 if won on first
+        rewards[won] += 8.0 + (guesses_remaining[won] * 0.3)
+        rewards[(~won) & done] -= 2.0
         # -------------------------------
 
         # --- 3. EXTRACT GUESS COUNTS FOR COMPLETED GAMES ---
@@ -138,8 +153,11 @@ class NumpyWordleEnv:
         info = {
             "wins": won.sum(), 
             "dones": done.sum(),
-            "guesses": guesses_for_dones
+            "guesses": guesses_for_dones,
+            "avg_info_gain" : info_gain.mean(),
+            "avg_progress": progress_reward.mean()
         }
+        
         # ---------------------------
         
         if done.any():
@@ -148,12 +166,12 @@ class NumpyWordleEnv:
         return self._get_obs(), rewards, done, info
 
     def _reset_specific(self, idxs):
-        self.secret_idxs[idxs] = self._sample_secrets(len(idxs))
-        self.step_nums[idxs] = 0
-        self.masks[idxs] = True
-        self.min_counts[idxs] = 0
-        self.max_counts[idxs] = 5.0
-        self.letter_green[idxs] = 0
+        self.secret_idxs[idxs]       = self._sample_secrets(len(idxs))
+        self.step_nums[idxs]         = 0
+        self.masks[idxs]             = True   # still works, now resets (len(idxs), n_secrets) rows
+        self.min_counts[idxs]        = 0
+        self.max_counts[idxs]        = 5.0
+        self.letter_green[idxs]      = 0
         self.letter_yellow_not[idxs] = 0
 
     def _get_obs(self):
@@ -230,8 +248,21 @@ def main():
         log_wins = 0
         log_dones = 0
         log_guesses = []
-
+        log_info_gains = []  # ← add this
+        log_progress = []
+        obs_dim = base_env.OBS_DIM
+        buf_obs      = torch.zeros(STEPS_PER_ENV, N_ENVS, obs_dim)
+        buf_actions  = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.long)
+        buf_logprobs = torch.zeros(STEPS_PER_ENV, N_ENVS)
+        buf_rewards  = torch.zeros(STEPS_PER_ENV, N_ENVS)
+        buf_values   = torch.zeros(STEPS_PER_ENV, N_ENVS)
+        buf_dones    = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.bool)
+        
         for iteration in range(args.start_iter, args.start_iter + args.iters):
+            
+            t_env = 0
+            t_net = 0
+            t_ppo = 0
             
             # --- Linear Decay Scheduler ---
             frac = 1.0 - (iteration - 1.0) / N_ITERATIONS
@@ -244,63 +275,73 @@ def main():
             # ------------------------------
 
             # ─── 1. TRAJECTORY COLLECTION ───
-            mb_obs, mb_actions, mb_log_probs, mb_rewards, mb_values, mb_dones = [], [], [], [], [], []
 
-            for _ in range(STEPS_PER_ENV):
-                with torch.no_grad():
+            for step in range(STEPS_PER_ENV):
+                
+                t0 = time.time()
+                
+                with torch.inference_mode():
                     o_t = torch.as_tensor(obs)
-                    # mask=None explicitly disables Hard Mode during acting
                     actions, log_probs, values = net.get_action(o_t, mask=curriculum_mask)
 
+                t_net += time.time() - t0
+
+                t0 = time.time()
+
+
                 next_obs, rewards, dones, info = vec_env.step(actions.numpy())
-                
-                # --- 4. ACCUMULATE METRICS ---
+
+                # --- ACCUMULATE METRICS (unchanged) ---
                 log_wins += info["wins"]
                 log_dones += info["dones"]
                 log_guesses.extend(info["guesses"].tolist())
-                # -----------------------------
+                log_info_gains.append(info["avg_info_gain"])
+                log_progress.append(info["avg_progress"])
+                # --------------------------------------
 
-                mb_obs.append(o_t)
-                mb_actions.append(actions)
-                mb_log_probs.append(log_probs)
-                mb_rewards.append(torch.as_tensor(rewards, dtype=torch.float32))
-                mb_values.append(values.flatten())
-                mb_dones.append(torch.as_tensor(dones))
+                # --- BUFFER WRITES (replaces list appends) ---
+                buf_obs[step]      = o_t
+                buf_actions[step]  = actions
+                buf_logprobs[step] = log_probs
+                buf_rewards[step]  = torch.as_tensor(rewards, dtype=torch.float32)
+                buf_values[step]   = values.flatten()
+                buf_dones[step]    = torch.as_tensor(dones)
                 obs = next_obs
 
             # ─── 2. ADVANTAGE CALCULATION (GAE) ───
-            with torch.no_grad():
-                _, _, last_value = net.get_action(torch.as_tensor(obs), mask=None)
+            with torch.inference_mode():
+                _, _, last_value = net.get_action(torch.as_tensor(obs), mask=curriculum_mask)
                 last_value = last_value.flatten()
 
-            mb_advantages = torch.zeros_like(torch.stack(mb_rewards))
+            mb_advantages = torch.zeros(STEPS_PER_ENV, N_ENVS)
             last_gae = 0
             for t in reversed(range(STEPS_PER_ENV)):
                 if t == STEPS_PER_ENV - 1:
-                    next_non_terminal = 1.0 - mb_dones[t].float()
+                    next_non_terminal = 1.0 - buf_dones[t].float()
                     next_value = last_value
                 else:
-                    next_non_terminal = 1.0 - mb_dones[t].float()
-                    next_value = mb_values[t+1]
+                    next_non_terminal = 1.0 - buf_dones[t].float()
+                    next_value = buf_values[t+1]
                 
-                delta = mb_rewards[t] + GAMMA * next_value * next_non_terminal - mb_values[t]
+                delta = buf_rewards[t] + GAMMA * next_value * next_non_terminal - buf_values[t]
                 mb_advantages[t] = last_gae = delta + GAMMA * GAE_LAMBDA * next_non_terminal * last_gae
-            
-            mb_returns = mb_advantages + torch.stack(mb_values)
 
-            # Flatten mini-batches
-            b_obs = torch.cat(mb_obs)
-            b_actions = torch.cat(mb_actions)
-            b_log_probs = torch.cat(mb_log_probs)
+            mb_returns = mb_advantages + buf_values
+
+            # Flatten
+            b_obs        = buf_obs.flatten(0, 1)
+            b_actions    = buf_actions.flatten(0, 1)
+            b_log_probs  = buf_logprobs.flatten(0, 1)
             b_advantages = mb_advantages.flatten()
-            
+            b_returns    = mb_returns.flatten()
+
             # --- ADVANTAGE NORMALIZATION ---
             b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
-            # -------------------------------
-            
-            b_returns = mb_returns.flatten()
 
             # ─── 3. PPO OPTIMIZATION ───
+            
+            t0 = time.time()
+            
             b_inds = np.arange(N_ENVS * STEPS_PER_ENV)
             mb_entropies = []
             mb_vf_losses = []
@@ -337,11 +378,13 @@ def main():
                     loss.backward()
                     nn.utils.clip_grad_norm_(net.parameters(), MAX_GRAD_NORM)
                     optimizer.step()
-
+            t_ppo += time.time() - t0
+            
+            print(f"  env: {t_env:.2f}s | net_inference: {t_net:.2f}s | ppo: {t_ppo:.2f}s")
             # ─── 4. LOGGING ───
             if iteration % LOG_EVERY == 0:
                 elapsed = time.time() - start_time
-                avg_rew = torch.stack(mb_rewards).mean().item()
+                avg_rew = buf_rewards.mean().item()
 
                 actual_entropy = np.mean(mb_entropies)
                 actual_vf_loss = np.mean(mb_vf_losses) # <--- NEW
@@ -349,6 +392,9 @@ def main():
                 # --- 5. CALCULATE HUMAN METRICS ---
                 win_rate = (log_wins / log_dones) if log_dones > 0 else 0.0
                 avg_guesses = np.mean(log_guesses) if len(log_guesses) > 0 else 6.0
+                
+                avg_info_gain = np.mean(log_info_gains) if len(log_info_gains) > 0 else 0.0
+                avg_progress = np.mean(log_progress) if len(log_progress) > 0 else 0.0
                 # ----------------------------------
 
                 # Updated print statement
@@ -364,13 +410,17 @@ def main():
                 # --- 6. LOG TO MLFLOW & RESET ---
                 mlflow.log_metric("win_rate", win_rate, step=iteration)
                 mlflow.log_metric("avg_guesses", avg_guesses, step=iteration)
+                mlflow.log_metric("avg_info_gain", avg_info_gain, step=iteration)
+                mlflow.log_metric("avg_progress", avg_progress, step=iteration)
                 
                 log_wins = 0
                 log_dones = 0
                 log_guesses = []
+                log_info_gains = []
+                log_progress = []
                 # --------------------------------
 
-            SAVE_FREQ = 25
+            SAVE_FREQ = 500
             if iteration % SAVE_FREQ == 0:
                 # Dynamically insert the phase number into the filename
                 save_path = f"{MODEL_DIR}/{args.name}_phase{args.phase}_it{iteration}.pt"

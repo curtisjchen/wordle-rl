@@ -24,18 +24,22 @@ Guess 2: CRANE  🟩🟩🟩🟩🟩   ✅ solved in 2!
 ### Environment
 A pure Python Wordle environment with no external RL libraries. Each episode the agent has up to 6 guesses to identify a hidden 5-letter word. After each guess it receives color feedback (green / yellow / gray) and a reward signal.
 
-**Action masking** — words eliminated by prior feedback are masked out of the action space, so the agent never guesses a word that contradicts what it already knows.
-
 ### Reward
-Still tweaking.
+Information gain -- the agent receives a reward for reducing the proportion of available words based on their guess. This incentivizes the agent to optimally reduce the state space with each guess.
+
+Winning -- the agent receives a reward for winning a game of wordle
+
+Losing -- the agent receives a discount for losing a game of wordle
+
+Steps -- the agent receives a discount for each step taken
 
 ### Network
-Still tweaking.
+Actor -- An MLP with a hidden dimension of 1024 and a policy head of all possible 5 letter words (roughly 15k dim)
+
+Critic -- Same as the Actor but with an output head of dimension 1 to guess the reward state of the current board, used for PPO.
 
 ### Training
 PPO (Proximal Policy Optimisation) implemented from scratch. The fast trainer runs N environments in parallel with a precomputed score cache that makes mask recomputation a single vectorised numpy op rather than a Python loop.
-
----
 
 ## Project Structure
 

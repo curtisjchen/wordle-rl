@@ -3,6 +3,7 @@ import torch
 import numpy as np
 
 import sys
+import argparse
 
 # --- PATH SETUP ---
 script_dir   = os.path.dirname(os.path.abspath(__file__))
@@ -10,7 +11,6 @@ project_root = os.path.dirname(script_dir)
 sys.path.append(project_root)
 
 # Adjust imports based on where you save this script
-import env
 from env.wordle_env import WordleEnv
 from agent.network import WordleNetwork
 
@@ -46,7 +46,7 @@ def evaluate(model_path, num_games=100):
     # --- NEW: Evaluation Masking (Optional, but recommended) ---
     # If you want to evaluate Phase 1 (only guessing candidate words), set this to True.
     # If you are evaluating Phase 2 (full 14k actions), set this to False.
-    EVALUATE_PHASE_1 = False 
+    EVALUATE_PHASE_1 = True 
     
     if EVALUATE_PHASE_1:
         eval_mask = torch.zeros(env.vocab_size, dtype=torch.bool)
@@ -68,14 +68,14 @@ def evaluate(model_path, num_games=100):
         random_test_idx = np.random.choice(env.test_indices)
         
         # Manually override the environment's secret word
-        env.secret_word = env.words[random_test_idx]
+        env.secret = env.words[random_test_idx]
         # --------------------------------------------------------------------
         
         done = False
         step_count = 0
         used_actions = set() # Prevent deterministic loop traps
 
-        print(f"\n--- Game {i+1} (Secret: {env.secret_word.upper()}) ---")
+        print(f"--- Game {i+1} (Secret: {env.secret.upper()}) ---")
 
         while not done:
             with torch.no_grad():
@@ -95,7 +95,7 @@ def evaluate(model_path, num_games=100):
             
             # --- THE COLOR FIX ---
             # Get the [2, 0, 1, 0, 0] score array to pass to your formatting function
-            colors = WordleEnv._score(guess, env.secret_word)
+            colors = WordleEnv._score(guess, env.secret)
             formatted_guess = format_guess(guess, colors)
             
             print(f"Step {step_count}:  {formatted_guess}")
@@ -103,7 +103,7 @@ def evaluate(model_path, num_games=100):
 
         # --- THE TRUE WIN FIX ---
         # The game is actually won if the final guess matches the secret word perfectly
-        won = (guess == env.secret_word)
+        won = (guess == env.secret)
         # ------------------------
 
         if won:
@@ -112,7 +112,7 @@ def evaluate(model_path, num_games=100):
             print(f"Result: WON in {step_count} guesses.")
         else:
             total_guesses += 6
-            print(f"Result: LOST. The word was {env.secret_word.upper()}")
+            print(f"Result: LOST. The word was {env.secret.upper()}")
 
     win_rate = (wins / num_games) * 100
     avg_guesses = total_guesses / num_games
@@ -124,5 +124,11 @@ def evaluate(model_path, num_games=100):
     print("="*30)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Wordle PPO Training")
+    parser.add_argument("--checkpoint", type=str, default=None, 
+                        help="Path to the checkpoint file to load")
+    parser.add_argument("--games", type=int, default=10, 
+                        help="Path to the checkpoint file to load")
+    args = parser.parse_args()  # ← missing
     # Point this to your best saved model!
-    evaluate("models/wordle_it400.pt", num_games=10)
+    evaluate(args.checkpoint, args.games)
