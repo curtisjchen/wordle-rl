@@ -246,12 +246,12 @@ def main():
         log_info_gains = []  # ← add this
         log_progress = []
         obs_dim = base_env.OBS_DIM
-        buf_obs      = torch.zeros(STEPS_PER_ENV, N_ENVS, obs_dim)
-        buf_actions  = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.long)
-        buf_logprobs = torch.zeros(STEPS_PER_ENV, N_ENVS)
-        buf_rewards  = torch.zeros(STEPS_PER_ENV, N_ENVS)
-        buf_values   = torch.zeros(STEPS_PER_ENV, N_ENVS)
-        buf_dones    = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.bool)
+        buf_obs      = torch.zeros(STEPS_PER_ENV, N_ENVS, obs_dim).to(device)
+        buf_actions  = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.long).to(device)
+        buf_logprobs = torch.zeros(STEPS_PER_ENV, N_ENVS).to(device)
+        buf_rewards  = torch.zeros(STEPS_PER_ENV, N_ENVS).to(device)
+        buf_values   = torch.zeros(STEPS_PER_ENV, N_ENVS).to(device)
+        buf_dones    = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.bool).to(device)
         win_rate_window = deque(maxlen=5000)  # last 1000 completed games
         
         for iteration in range(args.start_iter, args.start_iter + args.iters):
@@ -269,9 +269,9 @@ def main():
 
             for step in range(STEPS_PER_ENV):                
                 with torch.inference_mode():
-                    o_t = torch.as_tensor(obs)
+                    o_t = torch.as_tensor(obs).to(device)
                     actions, log_probs, values = net.get_action(o_t, mask=curriculum_mask)
-                next_obs, rewards, dones, info = vec_env.step(actions.numpy())
+                next_obs, rewards, dones, info = vec_env.step(actions.cpu().numpy())
 
                 # --- ACCUMULATE METRICS (unchanged) ---
                 log_wins += info["wins"]
@@ -288,17 +288,17 @@ def main():
                 buf_obs[step]      = o_t
                 buf_actions[step]  = actions
                 buf_logprobs[step] = log_probs
-                buf_rewards[step]  = torch.as_tensor(rewards, dtype=torch.float32)
+                buf_rewards[step] = torch.as_tensor(rewards, dtype=torch.float32).to(device)
+                buf_dones[step]   = torch.as_tensor(dones).to(device)
                 buf_values[step]   = values.flatten()
-                buf_dones[step]    = torch.as_tensor(dones)
                 obs = next_obs
 
             # ─── 2. ADVANTAGE CALCULATION (GAE) ───
             with torch.inference_mode():
-                _, _, last_value = net.get_action(torch.as_tensor(obs), mask=curriculum_mask)
+                _, _, last_value = net.get_action(torch.as_tensor(obs).to(device), mask=curriculum_mask)
                 last_value = last_value.flatten()
 
-            mb_advantages = torch.zeros(STEPS_PER_ENV, N_ENVS)
+            mb_advantages = torch.zeros(STEPS_PER_ENV, N_ENVS).to(device)
             last_gae = 0
             for t in reversed(range(STEPS_PER_ENV)):
                 if t == STEPS_PER_ENV - 1:
