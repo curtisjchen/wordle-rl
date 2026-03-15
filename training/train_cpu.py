@@ -198,7 +198,7 @@ def main():
         N_ENVS         = 64
         STEPS_PER_ENV  = 128
         MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4
-        LOG_EVERY      = 100
+        LOG_EVERY      = 50
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
