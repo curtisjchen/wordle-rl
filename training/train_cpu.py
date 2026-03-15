@@ -36,7 +36,7 @@ GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
 ENT_COEF       = 0.01        # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
-INFO_COEF      = 0.3        # Information Gain reward weight
+INFO_COEF      = 0.1        # Information Gain reward weight
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
 
 LOG_EVERY = 1
@@ -126,10 +126,10 @@ class NumpyWordleEnv:
         
         # --- 2. THE NEW REWARD LOGIC ---
         # Base step penalty
-        rewards = np.full(self.n_envs, -0.05, dtype=np.float32)
+        rewards = np.full(self.n_envs, -0.3, dtype=np.float32)
         rewards += info_gain * INFO_COEF
         guesses_remaining = 6 - self.step_nums  # ← add this
-        rewards[won] += 8.0 + (guesses_remaining[won] * 0.3)
+        rewards[won] += 8.0 + (guesses_remaining[won] * 1)
         rewards[(~won) & done] -= 2.0
         # -------------------------------
 
@@ -200,7 +200,7 @@ def main():
         STEPS_PER_ENV  = 128        # 
         MINIBATCH_SIZE = 8192       # Size of SGD chunks
         N_EPOCHS       = 2          # PPO epochs per update
-        N_ITERATIONS   = 2500       # Total training iterations
+        N_ITERATIONS   = 5000       # Total training iterations
         SAVE_FREQ      = 100
     
     base_env = WordleEnv(DATA_DIR)
