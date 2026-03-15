@@ -193,12 +193,6 @@ def main():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, LOG_EVERY
-        N_ENVS         = 64
-        STEPS_PER_ENV  = 128
-        MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4
-        LOG_EVERY      = 50
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
