@@ -9,6 +9,7 @@ project_root = os.path.dirname(script_dir)
 sys.path.append(project_root)
 # ------------------
 
+from collections import deque
 import time
 import numpy as np
 import torch
@@ -22,17 +23,18 @@ from agent.network import WordleNetwork
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
 N_ENVS         = 32 # Decreased parallel games to offset horizon
-STEPS_PER_ENV  = 60        # Increased horizon (Batch size = 8192)
+STEPS_PER_ENV  = 30        # Increased horizon (Batch size = 8192)
 MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4  # Size of SGD chunks
 N_EPOCHS       = 4          # PPO epochs per update
-N_ITERATIONS   = 50000      # Total training iterations
+N_ITERATIONS   = 20000      # Total training iterations
+N_DIMS = 256
 
 LR             = 1e-4       # Starting learning rate (will decay)
 MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
-ENT_COEF       = 0.3       # Starting exploration bonus (will decay)
+ENT_COEF       = 0.1        # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
 INFO_COEF      = 0.3        # Information Gain reward weight
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
@@ -87,13 +89,6 @@ class NumpyWordleEnv:
         guess_letters  = self.words_int[actions]
         encoded_scores = self.score_cache[actions, self.secret_idxs]
 
-        # was_valid: action must map to a candidate secret AND still be in mask
-        secret_action_idxs = self.vocab_to_secret[actions]          # vocab -> secret idx (-1 if not candidate)
-        is_candidate = secret_action_idxs >= 0
-        env_ids = np.arange(self.n_envs)
-        was_valid = np.zeros(self.n_envs, dtype=bool)
-        was_valid[is_candidate] = self.masks[env_ids[is_candidate], secret_action_idxs[is_candidate]]
-
         # Information gain over n_secrets axis
         words_before = self.masks.sum(axis=1)
         
@@ -130,15 +125,9 @@ class NumpyWordleEnv:
         
         # --- 2. THE NEW REWARD LOGIC ---
         # Base step penalty
-        rewards = np.full(self.n_envs, -0.05, dtype=np.float32) 
-        
-        # Add info gain (only if it was a valid guess, to prevent hacking)
-        rewards += (info_gain * INFO_COEF) * was_valid
-        
-        # Penalize guessing words we already know are wrong
-        rewards[~was_valid] -= 1.5 
-        
-        guesses_remaining = 6 - self.step_nums  # 0 if won on last guess, 5 if won on first
+        rewards = np.full(self.n_envs, -0.05, dtype=np.float32)
+        rewards += info_gain * INFO_COEF
+        guesses_remaining = 6 - self.step_nums  # ← add this
         rewards[won] += 8.0 + (guesses_remaining[won] * 0.3)
         rewards[(~won) & done] -= 2.0
         # -------------------------------
@@ -188,9 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description="Wordle PPO Training")
     parser.add_argument("--phase", type=int, default=1, choices=[1, 2], 
                         help="Curriculum Phase: 1 (Answers only) or 2 (All 14k words)")
-    parser.add_argument("--load", action="store_true", 
-                        help="Flag to load a saved checkpoint")
-    parser.add_argument("--checkpoint", type=str, default=None, 
+    parser.add_argument("--load", type=str, default=None, 
                         help="Path to the checkpoint file to load")
     parser.add_argument("--start-iter", type=int, default=1,
                         help="The iteration number to start counting from (useful for resuming)")
@@ -198,36 +185,44 @@ def main():
                         help="Number of iterations to run THIS session")
     parser.add_argument("--name", type=str, default="wordle",
                         help="Base name for saved models (e.g., 'wordle')")
+    parser.add_argument("--dims", type=int, default=1024,
+                        help="Number of hidden dimensions of MLP")
     
     args = parser.parse_args()
 
 
     os.makedirs(MODEL_DIR, exist_ok=True)
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
     vec_env = NumpyWordleEnv(base_env, score_cache, N_ENVS)
     
-    net = WordleNetwork(base_env.OBS_DIM, base_env.vocab_size).to(device)
+    net = WordleNetwork(base_env.OBS_DIM, base_env.vocab_size, hidden_dim=args.dims).to(device)
     optimizer = torch.optim.AdamW(net.parameters(), lr=LR, eps=1e-5)
 
     # --- 1. CHECKPOINT LOADING ---
     if args.load:
-        load_path = args.checkpoint
+        load_path = args.load
         if os.path.exists(load_path):
             print(f" [INFO] Loading checkpoint from {load_path}...")
-            net.load_state_dict(torch.load(load_path, map_location=torch.device('cpu'), weights_only=True))
-        else:
-            print(f" [WARNING] Checkpoint {load_path} not found. Starting fresh.")
+            checkpoint = torch.load(load_path, map_location='cpu', weights_only=False)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                net.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f" [INFO] Optimizer state restored.")
+            else:
+                # backwards compatibility with old checkpoints that only saved model
+                net.load_state_dict(checkpoint)
+                print(f" [INFO] Old checkpoint format - optimizer state not restored.")
 
     if args.phase == 1:
-        print(" [INFO] CURRICULUM PHASE 1: Restricting actions to the candidate secret words (2.3k).")
+        print(" [INFO] CURRICULUM PHASE 1: Restricting actions to the candidate secret words.")
         curriculum_mask = torch.zeros(base_env.vocab_size, dtype=torch.bool)
         curriculum_mask[base_env.test_indices] = True
         curriculum_mask = curriculum_mask.to(device)
     else:
-        print(" [INFO] CURRICULUM PHASE 2: Full 14,000 action space unlocked.")
+        print(" [INFO] CURRICULUM PHASE 2: Full action space unlocked.")
         curriculum_mask = None
 
     sqlite_path = os.path.join(project_root, "mlflow.db")
@@ -257,13 +252,9 @@ def main():
         buf_rewards  = torch.zeros(STEPS_PER_ENV, N_ENVS)
         buf_values   = torch.zeros(STEPS_PER_ENV, N_ENVS)
         buf_dones    = torch.zeros(STEPS_PER_ENV, N_ENVS, dtype=torch.bool)
+        win_rate_window = deque(maxlen=5000)  # last 1000 completed games
         
         for iteration in range(args.start_iter, args.start_iter + args.iters):
-            
-            t_env = 0
-            t_net = 0
-            t_ppo = 0
-            
             # --- Linear Decay Scheduler ---
             frac = 1.0 - (iteration - 1.0) / N_ITERATIONS
             frac = max(0, frac)
@@ -276,19 +267,10 @@ def main():
 
             # ─── 1. TRAJECTORY COLLECTION ───
 
-            for step in range(STEPS_PER_ENV):
-                
-                t0 = time.time()
-                
+            for step in range(STEPS_PER_ENV):                
                 with torch.inference_mode():
                     o_t = torch.as_tensor(obs)
                     actions, log_probs, values = net.get_action(o_t, mask=curriculum_mask)
-
-                t_net += time.time() - t0
-
-                t0 = time.time()
-
-
                 next_obs, rewards, dones, info = vec_env.step(actions.numpy())
 
                 # --- ACCUMULATE METRICS (unchanged) ---
@@ -297,6 +279,9 @@ def main():
                 log_guesses.extend(info["guesses"].tolist())
                 log_info_gains.append(info["avg_info_gain"])
                 log_progress.append(info["avg_progress"])
+                
+                win_rate_window.extend([1] * info["wins"])
+                win_rate_window.extend([0] * (info["dones"] - info["wins"]))
                 # --------------------------------------
 
                 # --- BUFFER WRITES (replaces list appends) ---
@@ -338,10 +323,7 @@ def main():
             # --- ADVANTAGE NORMALIZATION ---
             b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-            # ─── 3. PPO OPTIMIZATION ───
-            
-            t0 = time.time()
-            
+            # ─── 3. PPO OPTIMIZATION ───            
             b_inds = np.arange(N_ENVS * STEPS_PER_ENV)
             mb_entropies = []
             mb_vf_losses = []
@@ -378,9 +360,7 @@ def main():
                     loss.backward()
                     nn.utils.clip_grad_norm_(net.parameters(), MAX_GRAD_NORM)
                     optimizer.step()
-            t_ppo += time.time() - t0
-            
-            print(f"  env: {t_env:.2f}s | net_inference: {t_net:.2f}s | ppo: {t_ppo:.2f}s")
+
             # ─── 4. LOGGING ───
             if iteration % LOG_EVERY == 0:
                 elapsed = time.time() - start_time
@@ -395,10 +375,12 @@ def main():
                 
                 avg_info_gain = np.mean(log_info_gains) if len(log_info_gains) > 0 else 0.0
                 avg_progress = np.mean(log_progress) if len(log_progress) > 0 else 0.0
+                
+                rolling_win_rate = np.mean(win_rate_window) if len(win_rate_window) > 0 else 0.0
                 # ----------------------------------
 
                 # Updated print statement
-                print(f"Iter {iteration:4d} | Rew: {avg_rew:+.3f} | Win: {win_rate*100:5.1f}% | Guess: {avg_guesses:.2f} | LR: {current_lr:.5f} | Ent: {actual_entropy:.4f} | Time: {elapsed:.0f}s")
+                print(f"Iter {iteration:4d} | Rew: {avg_rew:+.3f} | Win: {win_rate*100:5.1f}% | Guess: {avg_guesses:.2f} | LR: {current_lr:.5f} | Ent: {actual_entropy:.4f} | Time: {elapsed // 60:.0f}m {elapsed % 60:.0f}s")
                 
                 mlflow.log_metric("avg_reward", avg_rew, step=iteration)
                 mlflow.log_metric("entropy_coef", current_ent, step=iteration)
@@ -412,19 +394,26 @@ def main():
                 mlflow.log_metric("avg_guesses", avg_guesses, step=iteration)
                 mlflow.log_metric("avg_info_gain", avg_info_gain, step=iteration)
                 mlflow.log_metric("avg_progress", avg_progress, step=iteration)
+                mlflow.log_metric("rolling_win_rate", rolling_win_rate, step=iteration)
                 
                 log_wins = 0
                 log_dones = 0
                 log_guesses = []
                 log_info_gains = []
                 log_progress = []
+                
                 # --------------------------------
 
             SAVE_FREQ = 500
             if iteration % SAVE_FREQ == 0:
                 # Dynamically insert the phase number into the filename
                 save_path = f"{MODEL_DIR}/{args.name}_phase{args.phase}_it{iteration}.pt"
-                torch.save(net.state_dict(), save_path)
+                # SAVING - replace current save with this
+                torch.save({
+                    'model_state_dict': net.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'iteration': iteration
+                }, save_path)
                 print(f" [SAVED] Checkpoint successfully written to {save_path}")
 
 if __name__ == "__main__":

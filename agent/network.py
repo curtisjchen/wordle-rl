@@ -25,7 +25,7 @@ class ResidualBlock(nn.Module):
         return x + residual
 
 class WordleNetwork(nn.Module):
-    def __init__(self, input_dim, action_dim, hidden_dim=1024):
+    def __init__(self, input_dim, action_dim, hidden_dim=256):
         super().__init__()
         
         # 1. Independent Actor (Policy)

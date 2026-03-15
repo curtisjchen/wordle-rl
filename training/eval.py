@@ -31,13 +31,18 @@ def format_guess(guess, scores):
             colored_chars.append(f"{GRAY_BG} {char.upper()} {RESET}")
     return "".join(colored_chars)
 
-def evaluate(model_path, num_games=100):
+def evaluate(model_path, num_games=100, dims=1024):
     device = torch.device("cpu")
     env = WordleEnv("data")
     
     # Load the trained network
-    net = WordleNetwork(env.OBS_DIM, env.vocab_size).to(device)
-    net.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    net = WordleNetwork(env.OBS_DIM, env.vocab_size, dims).to(device)
+    # NEW
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        net.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        net.load_state_dict(checkpoint)
     net.eval() # Set network to evaluation mode
 
     wins = 0
@@ -46,7 +51,7 @@ def evaluate(model_path, num_games=100):
     # --- NEW: Evaluation Masking (Optional, but recommended) ---
     # If you want to evaluate Phase 1 (only guessing candidate words), set this to True.
     # If you are evaluating Phase 2 (full 14k actions), set this to False.
-    EVALUATE_PHASE_1 = True 
+    EVALUATE_PHASE_1 = False
     
     if EVALUATE_PHASE_1:
         eval_mask = torch.zeros(env.vocab_size, dtype=torch.bool)
@@ -129,6 +134,8 @@ if __name__ == "__main__":
                         help="Path to the checkpoint file to load")
     parser.add_argument("--games", type=int, default=10, 
                         help="Path to the checkpoint file to load")
-    args = parser.parse_args()  # ← missing
+    parser.add_argument("--dims", type=int, default=1024, 
+                        help="Model hidden dims")
+    args = parser.parse_args() 
     # Point this to your best saved model!
-    evaluate(args.checkpoint, args.games)
+    evaluate(args.checkpoint, args.games, args.dims)
