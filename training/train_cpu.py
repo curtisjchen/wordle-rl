@@ -195,7 +195,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, LOG_EVERY
-        N_ENVS         = 512
+        N_ENVS         = 256
         STEPS_PER_ENV  = 128
         MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4
         LOG_EVERY      = 100
@@ -368,7 +368,7 @@ def main():
                     optimizer.step()
 
             # ─── 4. LOGGING ───
-            if iteration % LOG_EVERY == 0:
+            if (iteration - 1) % LOG_EVERY == 0:
                 elapsed = time.time() - start_time
                 avg_rew = buf_rewards.mean().item()
 
