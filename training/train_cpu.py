@@ -34,7 +34,7 @@ MIN_LR         = 3e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
-ENT_COEF       = 0.05        # Starting exploration bonus (will decay)
+ENT_COEF       = 0.01        # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
 INFO_COEF      = 0.3        # Information Gain reward weight
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
@@ -199,7 +199,7 @@ def main():
         STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
         MINIBATCH_SIZE = 8192  # Size of SGD chunks
         N_EPOCHS       = 2          # PPO epochs per update
-        N_ITERATIONS   = 1250      # Total training iterations
+        N_ITERATIONS   = 2500      # Total training iterations
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
