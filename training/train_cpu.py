@@ -24,9 +24,9 @@ from agent.network import WordleNetwork
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
 N_ENVS         = 1024 # Decreased parallel games to offset horizon
 STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
-MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4  # Size of SGD chunks
-N_EPOCHS       = 4          # PPO epochs per update
-N_ITERATIONS   = 20000      # Total training iterations
+MINIBATCH_SIZE = 8192  # Size of SGD chunks
+N_EPOCHS       = 2          # PPO epochs per update
+N_ITERATIONS   = 1250      # Total training iterations
 N_DIMS = 1024
 
 LR             = 1e-4       # Starting learning rate (will decay)
