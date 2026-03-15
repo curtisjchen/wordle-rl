@@ -22,7 +22,7 @@ from env.wordle_env import WordleEnv
 from agent.network import WordleNetwork
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
-N_ENVS         = 512 # Decreased parallel games to offset horizon
+N_ENVS         = 2048 # Decreased parallel games to offset horizon
 STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
 MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4  # Size of SGD chunks
 N_EPOCHS       = 4          # PPO epochs per update
