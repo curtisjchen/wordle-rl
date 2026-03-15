@@ -30,7 +30,7 @@ N_ITERATIONS   = 30000      # Total training iterations
 N_DIMS = 1024
 
 LR             = 1e-4       # Starting learning rate (will decay)
-MIN_LR         = 3e-5       # NEW: The absolute lowest the LR can go
+MIN_LR         = 1e-6       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
