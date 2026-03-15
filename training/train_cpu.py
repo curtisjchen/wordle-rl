@@ -40,6 +40,7 @@ INFO_COEF      = 0.3        # Information Gain reward weight
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
 
 LOG_EVERY = 1
+SAVE_FREQ = 500
 
 DATA_DIR       = "data"
 MODEL_DIR      = "models"
@@ -195,11 +196,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
-        N_ENVS         = 1024 # Decreased parallel games to offset horizon
-        STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
-        MINIBATCH_SIZE = 8192  # Size of SGD chunks
+        N_ENVS         = 1024       #  
+        STEPS_PER_ENV  = 128        # 
+        MINIBATCH_SIZE = 8192       # Size of SGD chunks
         N_EPOCHS       = 2          # PPO epochs per update
-        N_ITERATIONS   = 2500      # Total training iterations
+        N_ITERATIONS   = 2500       # Total training iterations
+        SAVE_FREQ      = 100
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
@@ -419,7 +421,6 @@ def main():
                 
                 # --------------------------------
 
-            SAVE_FREQ = 500
             if iteration % SAVE_FREQ == 0:
                 # Dynamically insert the phase number into the filename
                 save_path = f"{MODEL_DIR}/{args.name}_phase{args.phase}_it{iteration}.pt"
