@@ -22,15 +22,15 @@ from env.wordle_env import WordleEnv
 from agent.network import WordleNetwork
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
-N_ENVS         = 1024 # Decreased parallel games to offset horizon
+N_ENVS         = 64 # Decreased parallel games to offset horizon
 STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
-MINIBATCH_SIZE = 8192  # Size of SGD chunks
-N_EPOCHS       = 2          # PPO epochs per update
-N_ITERATIONS   = 1250      # Total training iterations
+MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 6  # Size of SGD chunks
+N_EPOCHS       = 4          # PPO epochs per update
+N_ITERATIONS   = 30000      # Total training iterations
 N_DIMS = 1024
 
 LR             = 1e-4       # Starting learning rate (will decay)
-MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
+MIN_LR         = 3e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
@@ -193,6 +193,13 @@ def main():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cude":
+        GLOBAL N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
+        N_ENVS         = 1024 # Decreased parallel games to offset horizon
+        STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
+        MINIBATCH_SIZE = 8192  # Size of SGD chunks
+        N_EPOCHS       = 2          # PPO epochs per update
+        N_ITERATIONS   = 1250      # Total training iterations
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
