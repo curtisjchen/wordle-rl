@@ -193,7 +193,7 @@ def main():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cude":
+    if device.type == "cuda":
         global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
         N_ENVS         = 1024 # Decreased parallel games to offset horizon
         STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
@@ -243,7 +243,13 @@ def main():
             "phase": args.phase  # <--- NEW: Log the phase
         })
         
-        print(f"lr: {LR} n_envs: {N_ENVS} steps: {STEPS_PER_ENV} info_coef: {INFO_COEF} batchsize: {N_ENVS * STEPS_PER_ENV} phase: {args.phase}" )
+        print(f"lr: {LR} \
+              \nn_envs: {N_ENVS} \
+              \nsteps: {STEPS_PER_ENV} \
+              \ninfo_coef: {INFO_COEF} \
+              \nbatchsize: {N_ENVS * STEPS_PER_ENV} \
+              \nphase: {args.phase} \
+              \nentropy_coef: {ENT_COEF}")
         
         obs = vec_env.reset_all()
         start_time = time.time()
