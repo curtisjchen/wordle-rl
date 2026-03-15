@@ -243,6 +243,8 @@ def main():
             "phase": args.phase  # <--- NEW: Log the phase
         })
         
+        print(f"lr: {LR} n_envs: {N_ENVS} steps: {STEPS_PER_ENV} info_coef: {INFO_COEF} batchsize: {N_ENVS * STEPS_PER_ENV} phase: {args.phase}" )
+        
         obs = vec_env.reset_all()
         start_time = time.time()
 
