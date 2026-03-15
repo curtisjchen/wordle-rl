@@ -193,6 +193,12 @@ def main():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, LOG_EVERY
+        N_ENVS         = 512
+        STEPS_PER_ENV  = 128
+        MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4
+        LOG_EVERY      = 100
     
     base_env = WordleEnv(DATA_DIR)
     score_cache = np.load(os.path.join(DATA_DIR, "score_cache.npy"))
@@ -415,6 +421,10 @@ def main():
                     'iteration': iteration
                 }, save_path)
                 print(f" [SAVED] Checkpoint successfully written to {save_path}")
+            if iteration % 100 == 0:
+                allocated = torch.cuda.memory_allocated() / 1e9
+                reserved  = torch.cuda.memory_reserved() / 1e9
+                print(f"GPU memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
 
 if __name__ == "__main__":
     main()
