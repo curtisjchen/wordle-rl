@@ -194,7 +194,7 @@ def main():
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cude":
-        GLOBAL N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
+        global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
         N_ENVS         = 1024 # Decreased parallel games to offset horizon
         STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
         MINIBATCH_SIZE = 8192  # Size of SGD chunks
