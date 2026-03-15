@@ -22,12 +22,12 @@ from env.wordle_env import WordleEnv
 from agent.network import WordleNetwork
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
-N_ENVS         = 32 # Decreased parallel games to offset horizon
-STEPS_PER_ENV  = 30        # Increased horizon (Batch size = 8192)
+N_ENVS         = 64 # Decreased parallel games to offset horizon
+STEPS_PER_ENV  = 128        # Increased horizon (Batch size = 8192)
 MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4  # Size of SGD chunks
 N_EPOCHS       = 4          # PPO epochs per update
 N_ITERATIONS   = 20000      # Total training iterations
-N_DIMS = 256
+N_DIMS = 1024
 
 LR             = 1e-4       # Starting learning rate (will decay)
 MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
@@ -195,7 +195,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, LOG_EVERY
-        N_ENVS         = 256
+        N_ENVS         = 64
         STEPS_PER_ENV  = 128
         MINIBATCH_SIZE = N_ENVS * STEPS_PER_ENV // 4
         LOG_EVERY      = 100
