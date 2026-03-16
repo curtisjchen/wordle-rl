@@ -243,9 +243,16 @@ def main():
     mlflow.set_experiment("Wordle_RL_CPU")
     with mlflow.start_run():
         mlflow.log_params({
-            "lr": LR, "n_envs": N_ENVS, "steps": STEPS_PER_ENV, 
-            "info_coef": current_info_coef, "batch_size": N_ENVS * STEPS_PER_ENV,
-            "phase": args.phase  # <--- NEW: Log the phase
+            "decay iters": N_ITERATIONS,
+            "lr": LR, 
+            "end_lr": MIN_LR,
+            "n_envs": N_ENVS, 
+            "steps": STEPS_PER_ENV, 
+            "info_coef start": INFO_COEF_START,
+            "info_coef_end": INFO_COEF_END, 
+            "entropy_coef start": ENT_COEF,
+            "batch_size": N_ENVS * STEPS_PER_ENV,
+            "phase": args.phase 
         })
         
         print(f"lr: {LR} \
