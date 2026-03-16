@@ -31,19 +31,11 @@ def find_best_openers(top_n=20):
 
     results.sort(reverse=True)
 
-    print(f"{'Rank':<6} {'Word':<10} {'Entropy (bits)':<16} {'In Candidate List'}")
+    print(f"{'Rank':<6} {'Word':<10} {'Entropy (bits)':<16}")
     print("-" * 50)
     candidate_set = set(env.test_indices.tolist())
     for rank, (entropy, word, g_idx) in enumerate(results[:top_n], 1):
-        in_candidates = "✓" if g_idx in candidate_set else ""
-        print(f"{rank:<6} {word.upper():<10} {entropy:<16.4f} {in_candidates}")
-
-    print("\n--- Top 10 openers restricted to candidate words only ---")
-    candidate_results = [(e, w, i) for e, w, i in results if i in candidate_set]
-    print(f"{'Rank':<6} {'Word':<10} {'Entropy (bits)':<16}")
-    print("-" * 35)
-    for rank, (entropy, word, _) in enumerate(candidate_results[:10], 1):
         print(f"{rank:<6} {word.upper():<10} {entropy:<16.4f}")
 
 if __name__ == "__main__":
-    find_best_openers(top_n=20)
+    find_best_openers(top_n=50)

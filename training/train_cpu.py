@@ -29,14 +29,17 @@ N_EPOCHS       = 4          # PPO epochs per update
 N_ITERATIONS   = 30000      # Total training iterations
 N_DIMS = 1024
 
-LR             = 1e-4       # Starting learning rate (will decay)
-MIN_LR         = 1e-6       # NEW: The absolute lowest the LR can go
+LR             = 5e-5       # Starting learning rate (will decay)
+MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
-ENT_COEF       = 0.01        # Starting exploration bonus (will decay)
+ENT_COEF       = 0.1        # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
-INFO_COEF      = 0.1        # Information Gain reward weight
+
+INFO_COEF_START = 0.5
+INFO_COEF_END   = 0.05       # Information Gain reward weight
+
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
 
 LOG_EVERY = 1
@@ -85,7 +88,7 @@ class NumpyWordleEnv:
         self.letter_yellow_not = np.zeros((self.n_envs, 5, 26), dtype=np.float32)
         return self._get_obs()
 
-    def step(self, actions):
+    def step(self, actions, info_coef):
         current_colors = self.color_cache[actions, self.secret_idxs]
         guess_letters  = self.words_int[actions]
         encoded_scores = self.score_cache[actions, self.secret_idxs]
@@ -127,7 +130,7 @@ class NumpyWordleEnv:
         # --- 2. THE NEW REWARD LOGIC ---
         # Base step penalty
         rewards = np.full(self.n_envs, -0.3, dtype=np.float32)
-        rewards += info_gain * INFO_COEF
+        rewards += info_gain * info_coef
         guesses_remaining = 6 - self.step_nums  # ← add this
         rewards[won] += 8.0 + (guesses_remaining[won] * 1)
         rewards[(~won) & done] -= 2.0
@@ -200,7 +203,7 @@ def main():
         STEPS_PER_ENV  = 128        # 
         MINIBATCH_SIZE = 8192       # Size of SGD chunks
         N_EPOCHS       = 2          # PPO epochs per update
-        N_ITERATIONS   = 5000       # Total training iterations
+        N_ITERATIONS   = 1000       # Total training iterations
         SAVE_FREQ      = 100
     
     base_env = WordleEnv(DATA_DIR)
@@ -241,14 +244,14 @@ def main():
     with mlflow.start_run():
         mlflow.log_params({
             "lr": LR, "n_envs": N_ENVS, "steps": STEPS_PER_ENV, 
-            "info_coef": INFO_COEF, "batch_size": N_ENVS * STEPS_PER_ENV,
+            "info_coef": current_info_coef, "batch_size": N_ENVS * STEPS_PER_ENV,
             "phase": args.phase  # <--- NEW: Log the phase
         })
         
         print(f"lr: {LR} \
               \nn_envs: {N_ENVS} \
               \nsteps: {STEPS_PER_ENV} \
-              \ninfo_coef: {INFO_COEF} \
+              \ninfo_coef: {current_info_coef} \
               \nbatchsize: {N_ENVS * STEPS_PER_ENV} \
               \nphase: {args.phase} \
               \nentropy_coef: {ENT_COEF}")
@@ -276,7 +279,8 @@ def main():
             frac = 1.0 - (iteration - 1.0) / N_ITERATIONS
             frac = max(0, frac)
             current_lr = MIN_LR + (LR - MIN_LR) * frac
-            current_ent = max(0.001, ENT_COEF * frac)
+            current_ent = max(0.0001, ENT_COEF * frac)
+            current_info_coef = INFO_COEF_END + (INFO_COEF_START - INFO_COEF_END) * frac
             
             for param_group in optimizer.param_groups:
                 param_group["lr"] = current_lr
@@ -288,7 +292,7 @@ def main():
                 with torch.inference_mode():
                     o_t = torch.as_tensor(obs).to(device)
                     actions, log_probs, values = net.get_action(o_t, mask=curriculum_mask)
-                next_obs, rewards, dones, info = vec_env.step(actions.cpu().numpy())
+                next_obs, rewards, dones, info = vec_env.step(actions.cpu().numpy(), current_info_coef)
 
                 # --- ACCUMULATE METRICS (unchanged) ---
                 log_wins += info["wins"]
@@ -412,6 +416,7 @@ def main():
                 mlflow.log_metric("avg_info_gain", avg_info_gain, step=iteration)
                 mlflow.log_metric("avg_progress", avg_progress, step=iteration)
                 mlflow.log_metric("rolling_win_rate", rolling_win_rate, step=iteration)
+                mlflow.log_metric("info_coef", current_info_coef, step=iteration)
                 
                 log_wins = 0
                 log_dones = 0

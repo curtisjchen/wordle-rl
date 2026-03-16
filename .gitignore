@@ -13,3 +13,4 @@ models/*
 mlruns/*
 mlflow.db
 
+.env
