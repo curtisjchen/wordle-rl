@@ -198,7 +198,7 @@ def main():
     os.makedirs(MODEL_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
-        global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS
+        global N_ENVS, STEPS_PER_ENV, MINIBATCH_SIZE, N_EPOCHS, N_ITERATIONS, SAVE_FREQ
         N_ENVS         = 1024       #  
         STEPS_PER_ENV  = 128        # 
         MINIBATCH_SIZE = 8192       # Size of SGD chunks
@@ -446,6 +446,7 @@ def main():
                     'iteration': iteration
                 }, save_path)
                 print(f" [SAVED] Checkpoint successfully written to {save_path}")
+            
             if iteration % 100 == 0:
                 allocated = torch.cuda.memory_allocated() / 1e9
                 reserved  = torch.cuda.memory_reserved() / 1e9
