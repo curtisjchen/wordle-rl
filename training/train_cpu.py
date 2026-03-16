@@ -255,13 +255,16 @@ def main():
             "phase": args.phase 
         })
         
-        print(f"lr: {LR} \
-              \nn_envs: {N_ENVS} \
-              \nsteps: {STEPS_PER_ENV} \
-              \ninfo_coef: {current_info_coef} \
-              \nbatchsize: {N_ENVS * STEPS_PER_ENV} \
-              \nphase: {args.phase} \
-              \nentropy_coef: {ENT_COEF}")
+        print(f"decay_iters: {N_ITERATIONS} \
+            \nlr: {LR} \
+            \nend_lr: {MIN_LR} \
+            \nn_envs: {N_ENVS} \
+            \nsteps: {STEPS_PER_ENV} \
+            \ninfo_coef_start: {INFO_COEF_START} \
+            \ninfo_coef_end: {INFO_COEF_END} \
+            \nentropy_coef_start: {ENT_COEF} \
+            \nbatch_size: {N_ENVS * STEPS_PER_ENV} \
+            \nphase: {args.phase}")
         
         obs = vec_env.reset_all()
         start_time = time.time()
