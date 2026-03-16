@@ -203,7 +203,7 @@ def main():
         STEPS_PER_ENV  = 128        # 
         MINIBATCH_SIZE = 8192       # Size of SGD chunks
         N_EPOCHS       = 2          # PPO epochs per update
-        N_ITERATIONS   = 1000       # Total training iterations
+        N_ITERATIONS   = 300       # decay iterations
         SAVE_FREQ      = 100
     
     base_env = WordleEnv(DATA_DIR)
