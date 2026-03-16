@@ -34,10 +34,10 @@ MIN_LR         = 1e-5       # NEW: The absolute lowest the LR can go
 GAMMA          = 0.99       # Discount factor
 GAE_LAMBDA     = 0.95       # GAE smoothing parameter
 CLIP_EPS       = 0.2        # PPO clip range
-ENT_COEF       = 0.1        # Starting exploration bonus (will decay)
+ENT_COEF       = 0.02        # Starting exploration bonus (will decay)
 VF_COEF        = 0.5        # Value loss weight
 
-INFO_COEF_START = 0.5
+INFO_COEF_START = 0.2
 INFO_COEF_END   = 0.05       # Information Gain reward weight
 
 MAX_GRAD_NORM  = 0.5        # Gradient clipping
