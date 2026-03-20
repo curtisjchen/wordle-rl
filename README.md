@@ -24,16 +24,34 @@ Guess 2: CRANE  🟩🟩🟩🟩🟩   ✅ solved in 2!
 ### Environment
 A pure Python Wordle environment with no external RL libraries. Each episode the agent has up to 6 guesses to identify a hidden 5-letter word. After each guess it receives color feedback (green / yellow / gray) and a reward signal.
 
-**Action masking** — words eliminated by prior feedback are masked out of the action space, so the agent never guesses a word that contradicts what it already knows.
-
 ### Reward
-Still tweaking.
+The reward function has three components that encourage both winning and efficient play:
+
+| Signal | When | Purpose |
+|--------|------|---------|
+| `0.5 × log(before/after)` | Every step | Reward information gain — shrinking the candidate pool |
+| `32 / 16 / 8 / 4 / 2 / 1` | Win in 1–6 guesses | Exponential win bonus |
+| `-6.0` | Loss | Terminal penalty |
+
+The info gain signal already implicitly penalises wasting steps — a guess that barely shrinks the candidate pool gets near-zero reward, naturally pushing the agent toward efficient play. The exponential win scale means winning in 2 guesses (16.0) is rewarded 4× more than winning in 4 (4.0), matching the actual difficulty curve of Wordle.
 
 ### Network
-Still tweaking.
+An embedding-based actor-critic MLP. Rather than feeding raw numbers, each board tile is represented as learned embeddings:
+
+```
+Letter embedding:  27 values → 32 dims   (a–z + empty)
+Color  embedding:   4 values →  8 dims   (gray / yellow / green / empty)
+Step   embedding:   7 values →  8 dims   (0–6)
+
+30 tiles × (32 + 8) + 8 step = 1208-dim input
+→ Linear(1208, 256) → ReLU
+→ Linear(256,  256) → ReLU
+→ Policy head: Linear(256, vocab_size)   — action logits
+→ Value  head: Linear(256, 1)            — state value estimate
+```
 
 ### Training
-PPO (Proximal Policy Optimisation) implemented from scratch. The fast trainer runs N environments in parallel with a precomputed score cache that makes mask recomputation a single vectorised numpy op rather than a Python loop.
+PPO (Proximal Policy Optimisation) implemented from scratch. The fast trainer runs 32 environments in parallel with a precomputed score cache that makes mask recomputation a single vectorised numpy op rather than a Python loop.
 
 ---
 
